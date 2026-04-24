@@ -24,7 +24,7 @@ BASE_DIR = "/home/user/endo2"
 TIMETABLE_FILE = os.path.join(BASE_DIR, "2023학년도 1학년 2학기 시간표(안)_231005_공지용.xlsx")
 JUNGRI_PDF = os.path.join(BASE_DIR, "[정리족]내분비학 1차 정리족(2).pdf")
 CHUL_PDF = os.path.join(BASE_DIR, "[출족]내분비학 1차 출족(2).pdf")
-MODEL = "claude-opus-4-7"
+MODEL = "claude-sonnet-4-6"
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -310,7 +310,6 @@ def run_agent(
         response = client.messages.create(
             model=MODEL,
             max_tokens=8096,
-            thinking={"type": "adaptive"},
             system=system_prompt,
             tools=tools,
             messages=messages,
@@ -319,9 +318,7 @@ def run_agent(
         # Convert response content to serializable list for messages history
         assistant_content = []
         for block in response.content:
-            if block.type == "thinking":
-                assistant_content.append({"type": "thinking", "thinking": block.thinking})
-            elif block.type == "text":
+            if block.type == "text":
                 assistant_content.append({"type": "text", "text": block.text})
             elif block.type == "tool_use":
                 assistant_content.append({
