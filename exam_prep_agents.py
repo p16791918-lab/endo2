@@ -517,11 +517,53 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
 # Feature 3: 주말 업데이트 비교 (compare)
 # ---------------------------------------------------------------------------
 
-def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None) -> str:
+def agent_detect_professor_changes(new_jungri_pdf: str) -> str:
+    """구버전/신버전 정리족 목차를 비교해 교수가 바뀐 수업을 감지한다."""
+    prompt = f"""두 정리족 파일의 목차에서 수업별 담당 교수님을 추출하고 비교하세요.
+
+[구버전 정리족 (작년)]
+{JUNGRI_PDF}
+
+[신버전 정리족 (올해)]
+{new_jungri_pdf}
+
+[작업]
+1. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_old_prof.txt && head -n 150 /tmp/jungri_old_prof.txt
+2. pdftotext -layout "{new_jungri_pdf}" /tmp/jungri_new_prof.txt && head -n 150 /tmp/jungri_new_prof.txt
+3. 목차의 "교수명 – 수업명" 패턴으로 각 버전의 수업-교수 목록을 추출
+4. 두 목록을 비교
+
+[출력 형식 — 반드시 이 형식만 출력, 다른 설명 없이]
+SAME: [수업명] | [교수명]
+CHANGED: [수업명] | [구버전 교수명] → [신버전 교수명]
+NEW: [수업명] | [신버전 교수명]
+REMOVED: [수업명] | [구버전 교수명]"""
+
+    return run_claude(prompt, "교수 변경 감지 Agent", timeout=300)
+
+
+def parse_professor_changes(agent_output: str) -> list[tuple[str, str]]:
+    """'CHANGED: 수업명 | 구교수 → 신교수' 라인을 파싱해 [(수업명, 설명)] 리스트 반환."""
+    changed = []
+    for line in agent_output.splitlines():
+        line = line.strip()
+        if line.startswith("CHANGED:") or line.startswith("NEW:") or line.startswith("REMOVED:"):
+            parts = line.split("|", 1)
+            subject_part = parts[0].split(":", 1)[1].strip()
+            detail = parts[1].strip() if len(parts) > 1 else ""
+            changed.append((subject_part, f"{line.split(':')[0]}: {detail}"))
+    return changed
+
+
+def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None, skip_subjects: list[str]) -> str:
     focus = f"\n⚠️ 특히 {date_range} 주간 해당 내용에 집중하세요." if date_range else ""
+    skip_note = (
+        f"\n\n⛔ 아래 수업은 교수님이 바뀌어 비교 불가 — 완전히 건너뛰세요:\n"
+        + "\n".join(f"- {s}" for s in skip_subjects)
+    ) if skip_subjects else ""
 
     prompt = f"""당신은 의과대학 정리족 버전 비교 전문가입니다.
-작년 정리족(구버전)과 올해 새 정리족(신버전)을 비교하여 무엇이 달라졌는지 분석하세요.{focus}
+작년 정리족(구버전)과 올해 새 정리족(신버전)을 비교하여 무엇이 달라졌는지 분석하세요.{focus}{skip_note}
 
 [구버전 정리족 (작년)]
 {JUNGRI_PDF}
@@ -533,7 +575,7 @@ def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None) -> str:
 1. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_old.txt
 2. pdftotext -layout "{new_jungri_pdf}" /tmp/jungri_new.txt
 3. head -n 200 /tmp/jungri_old.txt 및 head -n 200 /tmp/jungri_new.txt 로 목차 비교
-4. 챕터/섹션별로 내용 비교
+4. 교수 변경 없는 수업만 챕터/섹션별로 내용 비교
 
 [출력 형식]
 
@@ -556,11 +598,15 @@ def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None) -> str:
     return run_claude(prompt, "정리족 비교 Agent", timeout=600)
 
 
-def agent_compare_chul(new_chul_pdf: str, date_range: str | None) -> str:
+def agent_compare_chul(new_chul_pdf: str, date_range: str | None, skip_subjects: list[str]) -> str:
     focus = f"\n⚠️ 특히 {date_range} 주간 해당 내용에 집중하세요." if date_range else ""
+    skip_note = (
+        f"\n\n⛔ 아래 수업은 교수님이 바뀌어 비교 불가 — 완전히 건너뛰세요:\n"
+        + "\n".join(f"- {s}" for s in skip_subjects)
+    ) if skip_subjects else ""
 
     prompt = f"""당신은 의과대학 출족 버전 비교 전문가입니다.
-작년 출족(구버전)과 올해 새 출족(신버전)을 비교하여 기출 트렌드 변화를 분석하세요.{focus}
+작년 출족(구버전)과 올해 새 출족(신버전)을 비교하여 기출 트렌드 변화를 분석하세요.{focus}{skip_note}
 
 [구버전 출족 (작년)]
 {CHUL_PDF}
@@ -572,7 +618,7 @@ def agent_compare_chul(new_chul_pdf: str, date_range: str | None) -> str:
 1. pdftotext -layout "{CHUL_PDF}" /tmp/chul_old.txt
 2. pdftotext -layout "{new_chul_pdf}" /tmp/chul_new.txt
 3. head -n 200 /tmp/chul_old.txt 및 head -n 200 /tmp/chul_new.txt 로 목차 비교
-4. 문제 목록 비교 — 새 문제, 삭제된 문제, 해설 변경
+4. 교수 변경 없는 수업만 문제 목록 비교
 
 [출력 형식]
 
@@ -607,10 +653,24 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
             print(f"오류: {label} 파일을 찾을 수 없습니다: {path}")
             return
 
+    # 교수 변경 감지 (비교 에이전트 실행 전에 먼저)
+    print("[사전 검사] 교수 변경 여부 감지 중...\n")
+    prof_output = agent_detect_professor_changes(new_jungri_pdf)
+    changed_subjects = parse_professor_changes(prof_output)
+    skip_subjects = [s for s, _ in changed_subjects]
+
+    if changed_subjects:
+        print("⚠️  교수님이 바뀐 수업이 있습니다 — 해당 수업은 비교에서 제외됩니다:\n")
+        for subject, detail in changed_subjects:
+            print(f"  🔄 {subject}: {detail}")
+        print()
+    else:
+        print("✅ 교수 변경 없음 — 전체 수업 비교를 진행합니다.\n")
+
     print("비교 에이전트 병렬 실행 중 (정리족 비교 / 출족 비교)...\n")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_jungri = executor.submit(agent_compare_jungri, new_jungri_pdf, date_range)
-        f_chul = executor.submit(agent_compare_chul, new_chul_pdf, date_range)
+        f_jungri = executor.submit(agent_compare_jungri, new_jungri_pdf, date_range, skip_subjects)
+        f_chul = executor.submit(agent_compare_chul, new_chul_pdf, date_range, skip_subjects)
         compare_jungri = f_jungri.result()
         print("[비교 Agent] 정리족 완료.")
         compare_chul = f_chul.result()
@@ -620,12 +680,18 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
     output_path = os.path.join(BASE_DIR, f"compare_{timestamp}.md")
     range_line = f"**비교 기간**: {date_range}\n" if date_range else ""
 
+    changed_section = ""
+    if changed_subjects:
+        lines = "\n".join(f"- 🔄 **{s}**: {d}" for s, d in changed_subjects)
+        changed_section = f"---\n\n## ⚠️ 교수 변경 — 비교 제외 수업\n\n{lines}\n\n"
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(f"# 주말 업데이트 비교 분석\n\n")
         f.write(f"**생성 시각**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{range_line}")
         f.write(f"**신버전 정리족**: `{os.path.basename(new_jungri_pdf)}`\n")
         f.write(f"**신버전 출족**: `{os.path.basename(new_chul_pdf)}`\n\n")
+        f.write(f"{changed_section}")
         f.write(f"---\n\n{compare_jungri}\n\n")
         f.write(f"---\n\n{compare_chul}\n")
 
