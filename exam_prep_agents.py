@@ -15,6 +15,8 @@ import concurrent.futures
 from datetime import datetime, date, timedelta
 
 import openpyxl
+import markdown
+from weasyprint import HTML as WeasyHTML
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -285,8 +287,10 @@ def run_exam_prep(date_str: str) -> None:
         f.write(f"---\n\n## 출족 분석\n\n{chul_result}\n\n")
         f.write(f"---\n\n## 강의록 보충\n\n{gangeui_result}\n")
 
+    pdf_path = convert_to_pdf(output_path)
     print(f"\n{'='*60}")
     print(f"  결과 저장 완료: {output_path}")
+    print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
 
@@ -403,8 +407,10 @@ def run_preview(date_str: str) -> None:
         f.write(f"---\n\n## 📋 핵심 개념 요약 (정리족)\n\n{preview_jungri}\n\n")
         f.write(f"---\n\n## 🔥 출족 출제 빈도 분석\n\n{preview_chul}\n")
 
+    pdf_path = convert_to_pdf(output_path)
     print(f"\n{'='*60}")
     print(f"  결과 저장 완료: {output_path}")
+    print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
 
@@ -508,8 +514,10 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
         f.write(f"**강의 파일**: `{os.path.basename(lecture_path)}`\n\n")
         f.write(f"---\n\n{result}\n")
 
+    pdf_path = convert_to_pdf(output_path)
     print(f"\n{'='*60}")
     print(f"  결과 저장 완료: {output_path}")
+    print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
 
@@ -695,9 +703,121 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
         f.write(f"---\n\n{compare_jungri}\n\n")
         f.write(f"---\n\n{compare_chul}\n")
 
+    pdf_path = convert_to_pdf(output_path)
     print(f"\n{'='*60}")
     print(f"  결과 저장 완료: {output_path}")
+    print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
+# PDF 변환
+# ---------------------------------------------------------------------------
+
+_PDF_CSS = """
+@import url('file:///usr/share/fonts/truetype/nanum/NanumGothic.ttf');
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: 'NanumGothic', 'NanumBarunGothic', sans-serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #1a1a1a;
+    margin: 0;
+    padding: 0;
+}
+
+@page {
+    margin: 18mm 15mm 18mm 15mm;
+    @bottom-center {
+        content: counter(page) " / " counter(pages);
+        font-size: 9pt;
+        color: #888;
+    }
+}
+
+h1 { font-size: 20pt; color: #1a3a5c; border-bottom: 2px solid #1a3a5c;
+     padding-bottom: 4pt; margin-top: 0; }
+h2 { font-size: 14pt; color: #1a3a5c; border-bottom: 1px solid #c0d0e0;
+     padding-bottom: 2pt; margin-top: 16pt; }
+h3 { font-size: 12pt; color: #2a5a8c; margin-top: 12pt; }
+h4 { font-size: 11pt; color: #3a6a9c; margin-top: 8pt; }
+
+p { margin: 4pt 0 6pt 0; }
+
+ul, ol { margin: 4pt 0 6pt 1.5em; padding: 0; }
+li { margin: 2pt 0; }
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 8pt 0;
+    font-size: 10pt;
+}
+th {
+    background: #1a3a5c;
+    color: white;
+    padding: 5pt 8pt;
+    text-align: left;
+}
+td {
+    border: 1px solid #c0d0e0;
+    padding: 4pt 8pt;
+}
+tr:nth-child(even) td { background: #f0f5fa; }
+
+code {
+    background: #f4f4f4;
+    padding: 1pt 4pt;
+    border-radius: 3pt;
+    font-size: 9.5pt;
+}
+pre {
+    background: #f4f4f4;
+    padding: 8pt;
+    border-left: 3pt solid #1a3a5c;
+    overflow-x: auto;
+    font-size: 9pt;
+    line-height: 1.4;
+}
+
+blockquote {
+    border-left: 3pt solid #7aabcc;
+    margin: 6pt 0;
+    padding: 4pt 10pt;
+    color: #444;
+    background: #f0f7fc;
+}
+
+hr { border: none; border-top: 1px solid #c0d0e0; margin: 12pt 0; }
+
+strong { color: #c0392b; }
+"""
+
+
+def convert_to_pdf(md_path: str) -> str:
+    """마크다운 파일을 PDF로 변환하고 PDF 경로를 반환한다."""
+    with open(md_path, encoding="utf-8") as f:
+        md_text = f.read()
+
+    body_html = markdown.markdown(
+        md_text,
+        extensions=["tables", "fenced_code", "nl2br"],
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>{_PDF_CSS}</style>
+</head>
+<body>{body_html}</body>
+</html>"""
+
+    pdf_path = md_path.replace(".md", ".pdf")
+    WeasyHTML(string=html, base_url=BASE_DIR).write_pdf(pdf_path)
+    return pdf_path
 
 
 # ---------------------------------------------------------------------------
