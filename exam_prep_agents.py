@@ -24,9 +24,8 @@ from weasyprint import HTML as WeasyHTML
 
 BASE_DIR = "/home/user/endo2"
 TIMETABLE_FILE = os.path.join(BASE_DIR, "2023학년도 1학년 2학기 시간표(안)_231005_공지용.xlsx")
-JUNGRI_PDF = os.path.join(BASE_DIR, "족보", "[정리족]내분비학 1차 정리족(2).pdf")
-CHUL_PDF   = os.path.join(BASE_DIR, "족보", "[출족]내분비학 1차 출족(2) (1).pdf")
-SENIORS_DIR = os.path.join(BASE_DIR, "선배족")
+JUNGRI_CHUL_DIR = os.path.join(BASE_DIR, "족보")    # 올해 정리족/출족
+SENIORS_DIR     = os.path.join(BASE_DIR, "선배족")  # 작년 정리족/출족
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -64,7 +63,7 @@ def agent_timetable(date_str: str) -> dict:
     wb = openpyxl.load_workbook(TIMETABLE_FILE, data_only=True)
     ws = wb.active
 
-    for section in TIMETABLE_SECTIONS:
+    for week_idx, section in enumerate(TIMETABLE_SECTIONS):
         date_row, first_row, last_row = section
         for col in range(1, 50):
             cell = ws.cell(row=date_row, column=col).value
@@ -84,8 +83,9 @@ def agent_timetable(date_str: str) -> dict:
                     "date": target.strftime("%Y-%m-%d"),
                     "weekday": WEEKDAY_KR[target.weekday()],
                     "classes": classes,
+                    "week": week_idx + 1,
                 }
-                print(f"[Agent 1] 완료. 수업 {len(classes)}개 발견.")
+                print(f"[Agent 1] 완료. {week_idx + 1}주차, 수업 {len(classes)}개 발견.")
                 return result
 
     return {"error": f"{date_str}에 해당하는 날짜를 시간표에서 찾을 수 없습니다."}
@@ -127,7 +127,7 @@ def run_claude(prompt: str, agent_name: str, timeout: int = 600, allowed_tools: 
 # Agent 2: 정리족
 # ---------------------------------------------------------------------------
 
-def agent_jungri(classes: list[dict]) -> str:
+def agent_jungri(classes: list[dict], jungri_pdf: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
     prompt = f"""당신은 의과대학 시험 대비 정리족 분석 전문가입니다.
@@ -138,11 +138,11 @@ def agent_jungri(classes: list[dict]) -> str:
 {subjects}
 
 [정리족 파일]
-{JUNGRI_PDF}
+{jungri_pdf}
 
 [작업 순서]
 1. Bash 도구로 PDF를 텍스트로 변환하세요:
-   pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri.txt
+   pdftotext -layout "{jungri_pdf}" /tmp/jungri.txt
 2. Bash로 목차를 확인하세요:
    head -n 200 /tmp/jungri.txt
 3. 각 수업별로 Bash grep 또는 Read로 섹션을 찾아 내용을 읽으세요.
@@ -163,7 +163,7 @@ def agent_jungri(classes: list[dict]) -> str:
 # Agent 3: 출족
 # ---------------------------------------------------------------------------
 
-def agent_chul(classes: list[dict]) -> str:
+def agent_chul(classes: list[dict], chul_pdf: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
     prompt = f"""당신은 의과대학 기출문제 분석 전문가입니다.
@@ -174,11 +174,11 @@ def agent_chul(classes: list[dict]) -> str:
 {subjects}
 
 [출족 파일]
-{CHUL_PDF}
+{chul_pdf}
 
 [작업 순서]
 1. Bash 도구로 PDF를 텍스트로 변환하세요:
-   pdftotext -layout "{CHUL_PDF}" /tmp/chul.txt
+   pdftotext -layout "{chul_pdf}" /tmp/chul.txt
 2. Bash로 목차를 확인하세요:
    head -n 200 /tmp/chul.txt
 3. 각 수업별로 기출문제 섹션을 찾아 읽으세요.
@@ -202,13 +202,13 @@ def agent_chul(classes: list[dict]) -> str:
 def agent_gangeui(classes: list[dict]) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
-    # 정리족/출족 제외한 강의 파일 목록
-    excluded = {os.path.basename(JUNGRI_PDF), os.path.basename(CHUL_PDF)}
+    # 강의록/ 폴더에서 파일 목록
+    gangeui_dir = os.path.join(BASE_DIR, "강의록")
     lecture_files = [
-        os.path.join(BASE_DIR, f)
-        for f in os.listdir(BASE_DIR)
-        if (f.endswith(".pdf") or f.endswith(".pptx")) and f not in excluded
-    ]
+        os.path.join(gangeui_dir, f)
+        for f in os.listdir(gangeui_dir)
+        if f.endswith(".pdf") or f.endswith(".pptx")
+    ] if os.path.isdir(gangeui_dir) else []
     files_str = "\n".join(f"- {f}" for f in lecture_files) if lecture_files else "없음"
 
     prompt = f"""당신은 의과대학 강의록 분석 전문가입니다.
@@ -255,7 +255,14 @@ def run_exam_prep(date_str: str) -> None:
         print(f"{date_str}에 수업이 없습니다.")
         return
 
-    print(f"\n[{timetable['date']} ({timetable['weekday']}요일)] 수업 목록:")
+    week = timetable.get("week", 1)
+    jungri_pdf, chul_pdf = get_jungri_chul_pdfs(week)
+    if not jungri_pdf or not chul_pdf:
+        print(f"⚠️  족보 폴더에 {week}주차 정리족/출족 파일이 없습니다.")
+        print(f"   → {JUNGRI_CHUL_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
+        return
+
+    print(f"\n[{timetable['date']} ({timetable['weekday']}요일) {week}주차] 수업 목록:")
     for c in classes:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
@@ -264,8 +271,8 @@ def run_exam_prep(date_str: str) -> None:
     print("에이전트 병렬 실행 중 (정리족 / 출족 / 강의록)...\n")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_jungri = executor.submit(agent_jungri, classes)
-        future_chul = executor.submit(agent_chul, classes)
+        future_jungri = executor.submit(agent_jungri, classes, jungri_pdf)
+        future_chul = executor.submit(agent_chul, classes, chul_pdf)
         future_gangeui = executor.submit(agent_gangeui, classes)
 
         jungri_result = future_jungri.result()
@@ -308,18 +315,69 @@ def safe_filename(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]', '_', s).strip('_')
 
 
-def find_seniors_pdfs() -> tuple[str | None, str | None]:
-    """선배족 폴더에서 정리족/출족 PDF를 찾아 반환. 없으면 None."""
-    jungri, chul = None, None
-    if os.path.isdir(SENIORS_DIR):
-        for f in os.listdir(SENIORS_DIR):
-            if not f.endswith('.pdf'):
+def find_pdf_for_week(folder: str, kind: str, week: int) -> str | None:
+    """folder에서 kind('정리족' or '출족')의 week주차 PDF를 반환. 파일명의 첫 번째 (N)이 주차."""
+    if not os.path.isdir(folder):
+        return None
+    for f in sorted(os.listdir(folder)):
+        if not f.endswith('.pdf') or kind not in f:
+            continue
+        m = re.search(r'\((\d+)\)', f)
+        if m and int(m.group(1)) == week:
+            return os.path.join(folder, f)
+    return None
+
+
+def find_seniors_pdf_for_subjects(kind: str, classes: list[dict]) -> str | None:
+    """선배족 폴더에서 kind 종류 PDF 중 classes 과목을 가장 많이 포함한 파일을 반환.
+    파일명의 주차 번호는 작년 기준이라 올해 시간표와 맞지 않으므로, 목차 내용으로 판단."""
+    if not os.path.isdir(SENIORS_DIR):
+        return None
+    pdfs = sorted(
+        os.path.join(SENIORS_DIR, f)
+        for f in os.listdir(SENIORS_DIR)
+        if f.endswith('.pdf') and kind in f
+    )
+    if not pdfs:
+        return None
+
+    best_pdf, best_count = None, 0
+    for pdf_path in pdfs:
+        text = extract_pdf_text(pdf_path)
+        toc_area = text[:4000]
+        count = 0
+        for c in classes:
+            subject, _ = normalize_subject(c["subject"])
+            subject_norm = re.sub(r'\s+', '', subject)
+            if not subject_norm or len(subject_norm) <= 2:
                 continue
-            if '정리족' in f:
-                jungri = os.path.join(SENIORS_DIR, f)
-            elif '출족' in f:
-                chul = os.path.join(SENIORS_DIR, f)
-    return jungri, chul
+            for m in re.finditer(r'([^\n·.]+?)\s*[·.]{4,}\s*p\s*[.\s]*(\d+)', toc_area):
+                if subject_norm in re.sub(r'\s+', '', m.group(1)):
+                    count += 1
+                    break
+        if count > best_count:
+            best_count = count
+            best_pdf = pdf_path
+    return best_pdf
+
+
+def list_seniors_pdfs(kind: str) -> list[str]:
+    """선배족 폴더의 kind 종류 PDF 전체 목록 반환."""
+    if not os.path.isdir(SENIORS_DIR):
+        return []
+    return sorted(
+        os.path.join(SENIORS_DIR, f)
+        for f in os.listdir(SENIORS_DIR)
+        if f.endswith('.pdf') and kind in f
+    )
+
+
+def get_jungri_chul_pdfs(week: int) -> tuple[str | None, str | None]:
+    """족보 폴더에서 해당 주차 정리족/출족을 반환."""
+    return (
+        find_pdf_for_week(JUNGRI_CHUL_DIR, '정리족', week),
+        find_pdf_for_week(JUNGRI_CHUL_DIR, '출족', week),
+    )
 
 
 def detect_subject_from_filename(lecture_path: str) -> str | None:
@@ -493,10 +551,14 @@ def run_preview(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
-    # 선배족 PDF 확인
-    seniors_jungri, seniors_chul = find_seniors_pdfs()
+    # 선배족 PDF 확인 (파일명 주차 번호는 작년 기준이라 무의미 — 목차로 과목 탐색)
+    seniors_jungri = find_seniors_pdf_for_subjects('정리족', classes)
+    seniors_chul   = find_seniors_pdf_for_subjects('출족', classes)
     if not seniors_jungri or not seniors_chul:
-        print("⚠️  선배족 폴더에 정리족/출족 PDF가 없습니다.")
+        missing = []
+        if not seniors_jungri: missing.append("정리족")
+        if not seniors_chul:   missing.append("출족")
+        print(f"⚠️  선배족 폴더에 {'/'.join(missing)} PDF가 없습니다.")
         print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
         sys.exit(1)
 
@@ -646,18 +708,22 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
         print(f"오류: 강의 파일을 찾을 수 없습니다: {lecture_path}")
         return
 
-    # 선배족 PDF 확인
-    seniors_jungri, seniors_chul = find_seniors_pdfs()
-    if not seniors_jungri or not seniors_chul:
-        print("⚠️  선배족 폴더에 정리족/출족 PDF가 없습니다.")
-        print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
-        return
-
     timetable = agent_timetable(date_str)
     if "error" in timetable:
         print(f"오류: {timetable['error']}")
         return
     classes = timetable.get("classes", [])
+
+    # 선배족 PDF 확인 (파일명 주차 번호는 작년 기준이라 무의미 — 목차로 과목 탐색)
+    seniors_jungri = find_seniors_pdf_for_subjects('정리족', classes)
+    seniors_chul   = find_seniors_pdf_for_subjects('출족', classes)
+    if not seniors_jungri or not seniors_chul:
+        missing = []
+        if not seniors_jungri: missing.append("정리족")
+        if not seniors_chul:   missing.append("출족")
+        print(f"⚠️  선배족 폴더에 {'/'.join(missing)} PDF가 없습니다.")
+        print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
+        return
 
     subject = detect_subject_from_filename(lecture_path)
     if subject is None:
@@ -701,16 +767,24 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
 
 def agent_detect_professor_changes(new_jungri_pdf: str) -> str:
     """구버전/신버전 정리족 목차를 비교해 교수가 바뀐 수업을 감지한다."""
+    old_jungri_list = list_seniors_pdfs('정리족')
+    old_jungri_str = "\n".join(f'- "{p}"' for p in old_jungri_list)
+    old_convert_cmds = "\n".join(
+        f'pdftotext -layout "{p}" /tmp/jungri_old_{i}.txt && head -n 150 /tmp/jungri_old_{i}.txt'
+        for i, p in enumerate(old_jungri_list)
+    )
+
     prompt = f"""두 정리족 파일의 목차에서 수업별 담당 교수님을 추출하고 비교하세요.
 
-[구버전 정리족 (작년)]
-{JUNGRI_PDF}
+[구버전 정리족 파일들 (작년 선배족)]
+{old_jungri_str}
 
 [신버전 정리족 (올해)]
-{new_jungri_pdf}
+"{new_jungri_pdf}"
 
 [작업]
-1. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_old_prof.txt && head -n 150 /tmp/jungri_old_prof.txt
+1. 구버전 파일들을 변환하여 목차 확인:
+{old_convert_cmds}
 2. pdftotext -layout "{new_jungri_pdf}" /tmp/jungri_new_prof.txt && head -n 150 /tmp/jungri_new_prof.txt
 3. 목차의 "교수명 – 수업명" 패턴으로 각 버전의 수업-교수 목록을 추출
 4. 두 목록을 비교
@@ -744,20 +818,34 @@ def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None, skip_subje
         + "\n".join(f"- {s}" for s in skip_subjects)
     ) if skip_subjects else ""
 
+    old_jungri_list = list_seniors_pdfs('정리족')
+    old_jungri_str = "\n".join(f'- "{p}"' for p in old_jungri_list)
+    old_convert_cmds = "\n".join(
+        f'pdftotext -layout "{p}" /tmp/jungri_old_{i}.txt'
+        for i, p in enumerate(old_jungri_list)
+    )
+    old_head_cmds = "\n".join(
+        f'head -n 200 /tmp/jungri_old_{i}.txt'
+        for i in range(len(old_jungri_list))
+    )
+
     prompt = f"""당신은 의과대학 정리족 버전 비교 전문가입니다.
 작년 정리족(구버전)과 올해 새 정리족(신버전)을 비교하여 무엇이 달라졌는지 분석하세요.{focus}{skip_note}
 
-[구버전 정리족 (작년)]
-{JUNGRI_PDF}
+[구버전 정리족 파일들 (작년 선배족)]
+{old_jungri_str}
 
 [신버전 정리족 (올해)]
-{new_jungri_pdf}
+"{new_jungri_pdf}"
 
 [작업 순서]
-1. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_old.txt
+1. 구버전 파일 변환:
+{old_convert_cmds}
 2. pdftotext -layout "{new_jungri_pdf}" /tmp/jungri_new.txt
-3. head -n 200 /tmp/jungri_old.txt 및 head -n 200 /tmp/jungri_new.txt 로 목차 비교
-4. 교수 변경 없는 수업만 챕터/섹션별로 내용 비교
+3. 구버전 목차 확인:
+{old_head_cmds}
+4. head -n 200 /tmp/jungri_new.txt 로 신버전 목차 확인
+5. 교수 변경 없는 수업만 챕터/섹션별로 내용 비교
 
 [출력 형식]
 
@@ -787,20 +875,34 @@ def agent_compare_chul(new_chul_pdf: str, date_range: str | None, skip_subjects:
         + "\n".join(f"- {s}" for s in skip_subjects)
     ) if skip_subjects else ""
 
+    old_chul_list = list_seniors_pdfs('출족')
+    old_chul_str = "\n".join(f'- "{p}"' for p in old_chul_list)
+    old_convert_cmds = "\n".join(
+        f'pdftotext -layout "{p}" /tmp/chul_old_{i}.txt'
+        for i, p in enumerate(old_chul_list)
+    )
+    old_head_cmds = "\n".join(
+        f'head -n 200 /tmp/chul_old_{i}.txt'
+        for i in range(len(old_chul_list))
+    )
+
     prompt = f"""당신은 의과대학 출족 버전 비교 전문가입니다.
 작년 출족(구버전)과 올해 새 출족(신버전)을 비교하여 기출 트렌드 변화를 분석하세요.{focus}{skip_note}
 
-[구버전 출족 (작년)]
-{CHUL_PDF}
+[구버전 출족 파일들 (작년 선배족)]
+{old_chul_str}
 
 [신버전 출족 (올해)]
-{new_chul_pdf}
+"{new_chul_pdf}"
 
 [작업 순서]
-1. pdftotext -layout "{CHUL_PDF}" /tmp/chul_old.txt
+1. 구버전 파일 변환:
+{old_convert_cmds}
 2. pdftotext -layout "{new_chul_pdf}" /tmp/chul_new.txt
-3. head -n 200 /tmp/chul_old.txt 및 head -n 200 /tmp/chul_new.txt 로 목차 비교
-4. 교수 변경 없는 수업만 문제 목록 비교
+3. 구버전 목차 확인:
+{old_head_cmds}
+4. head -n 200 /tmp/chul_new.txt 로 신버전 목차 확인
+5. 교수 변경 없는 수업만 문제 목록 비교
 
 [출력 형식]
 
