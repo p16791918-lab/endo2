@@ -308,6 +308,20 @@ def safe_filename(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]', '_', s).strip('_')
 
 
+def find_seniors_pdfs() -> tuple[str | None, str | None]:
+    """선배족 폴더에서 정리족/출족 PDF를 찾아 반환. 없으면 None."""
+    jungri, chul = None, None
+    if os.path.isdir(SENIORS_DIR):
+        for f in os.listdir(SENIORS_DIR):
+            if not f.endswith('.pdf'):
+                continue
+            if '정리족' in f:
+                jungri = os.path.join(SENIORS_DIR, f)
+            elif '출족' in f:
+                chul = os.path.join(SENIORS_DIR, f)
+    return jungri, chul
+
+
 def detect_subject_from_filename(lecture_path: str) -> str | None:
     """파일명에서 과목명 추출. '231023 6교시 갑상샘 종양_김보현 교수님.pdf' → '갑상샘 종양'"""
     stem = os.path.splitext(os.path.basename(lecture_path))[0]
@@ -479,10 +493,18 @@ def run_preview(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
+    # 선배족 PDF 확인
+    seniors_jungri, seniors_chul = find_seniors_pdfs()
+    if not seniors_jungri or not seniors_chul:
+        print("⚠️  선배족 폴더에 정리족/출족 PDF가 없습니다.")
+        print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
+        sys.exit(1)
+
     # Method A: Python에서 PDF 섹션 사전 추출
-    print("  [사전 추출] 정리족/출족 PDF 섹션 추출 중...\n")
-    jungri_text = extract_pdf_text(JUNGRI_PDF)
-    chul_text = extract_pdf_text(CHUL_PDF)
+    print(f"  [사전 추출] 선배족 정리족: {os.path.basename(seniors_jungri)}")
+    print(f"  [사전 추출] 선배족 출족:   {os.path.basename(seniors_chul)}\n")
+    jungri_text = extract_pdf_text(seniors_jungri)
+    chul_text = extract_pdf_text(seniors_chul)
 
     jungri_parts: list[str] = []
     chul_parts: list[str] = []
@@ -554,7 +576,13 @@ def run_preview(date_str: str) -> None:
 # Feature 2: 당일 강의록 통합 (lecture)
 # ---------------------------------------------------------------------------
 
-def agent_lecture_integrated(lecture_path: str, subject: str, classes: list[dict]) -> str:
+def agent_lecture_integrated(
+    lecture_path: str,
+    subject: str,
+    classes: list[dict],
+    seniors_jungri: str,
+    seniors_chul: str,
+) -> str:
     subjects_context = "\n".join(f"- {c['subject']}" for c in classes)
     ext = os.path.splitext(lecture_path)[1].lower()
 
@@ -569,7 +597,7 @@ def agent_lecture_integrated(lecture_path: str, subject: str, classes: list[dict
 
     prompt = f"""당신은 의과대학 당일 강의록 통합 분석 전문가입니다.
 
-오늘 교수님께서 나눠주신 강의 파일을 기존 정리족/출족과 비교 분석하세요.
+오늘 교수님께서 나눠주신 강의 파일을 선배족 정리족/출족과 비교 분석하세요.
 
 [오늘 수업 과목] {subject}
 [오늘 전체 수업 목록]
@@ -577,14 +605,14 @@ def agent_lecture_integrated(lecture_path: str, subject: str, classes: list[dict
 
 [파일 경로]
 - 오늘 강의 파일: {lecture_path}
-- 정리족 (작년): {JUNGRI_PDF}
-- 출족 (작년): {CHUL_PDF}
+- 선배족 정리족: {seniors_jungri}
+- 선배족 출족: {seniors_chul}
 
 [작업 순서]
 1. 강의 파일 읽기: {read_instruction}
-2. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_lec.txt
+2. pdftotext -layout "{seniors_jungri}" /tmp/jungri_lec.txt
 3. grep -n "{subject}" /tmp/jungri_lec.txt 로 정리족 섹션 위치 확인 후 읽기
-4. pdftotext -layout "{CHUL_PDF}" /tmp/chul_lec.txt
+4. pdftotext -layout "{seniors_chul}" /tmp/chul_lec.txt
 5. grep -n "{subject}" /tmp/chul_lec.txt 로 출족 섹션 위치 확인 후 읽기
 6. 세 자료를 비교 분석하여 아래 형식으로 출력
 
@@ -618,6 +646,13 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
         print(f"오류: 강의 파일을 찾을 수 없습니다: {lecture_path}")
         return
 
+    # 선배족 PDF 확인
+    seniors_jungri, seniors_chul = find_seniors_pdfs()
+    if not seniors_jungri or not seniors_chul:
+        print("⚠️  선배족 폴더에 정리족/출족 PDF가 없습니다.")
+        print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
+        return
+
     timetable = agent_timetable(date_str)
     if "error" in timetable:
         print(f"오류: {timetable['error']}")
@@ -635,7 +670,10 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
     else:
         print(f"[과목 자동 감지] {subject}")
 
-    result = agent_lecture_integrated(lecture_path, subject, classes)
+    print(f"  선배족 정리족: {os.path.basename(seniors_jungri)}")
+    print(f"  선배족 출족:   {os.path.basename(seniors_chul)}\n")
+
+    result = agent_lecture_integrated(lecture_path, subject, classes, seniors_jungri, seniors_chul)
     print("[강의록 통합 Agent] 완료.")
 
     fname = f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}"
