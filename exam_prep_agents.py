@@ -98,18 +98,19 @@ def run_claude(prompt: str, agent_name: str, timeout: int = 600, allowed_tools: 
     """claude -p 로 서브에이전트를 실행하고 결과를 반환한다."""
     try:
         tools_args = ["--allowedTools", allowed_tools] if allowed_tools and allowed_tools != "none" else []
+        work_dir = "/tmp" if not tools_args else BASE_DIR
         result = subprocess.run(
             [
                 "claude",
                 "--print",
-                prompt,
                 *tools_args,
                 "--output-format", "text",
             ],
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=BASE_DIR,
+            cwd=work_dir,
         )
         if result.returncode != 0:
             err = result.stderr[:300] if result.stderr else "(오류 메시지 없음)"
