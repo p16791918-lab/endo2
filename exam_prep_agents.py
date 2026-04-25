@@ -418,6 +418,24 @@ def normalize_subject(raw: str) -> tuple[str, str]:
     return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else (s.strip(), '')
 
 
+_ORGAN_SYNONYMS: list[tuple[str, str]] = [
+    ('갑상샘', '갑상선'),
+    ('부갑상샘', '부갑상선'),
+]
+
+
+def _search_variants(s: str) -> list[str]:
+    """s 와 동의어 치환 변형들을 반환 (중복 제거)."""
+    variants = [s]
+    for a, b in _ORGAN_SYNONYMS:
+        for v in list(variants):
+            if a in v:
+                variants.append(v.replace(a, b))
+            if b in v:
+                variants.append(v.replace(b, a))
+    return list(dict.fromkeys(variants))
+
+
 def find_section_in_pdf(full_text: str, subject: str, professor: str) -> str | None:
     """목차에서 과목/교수 위치를 찾아 해당 섹션만 반환. 못 찾으면 None."""
     toc_area = full_text[:4000]
@@ -428,15 +446,18 @@ def find_section_in_pdf(full_text: str, subject: str, professor: str) -> str | N
         if page_str.isdigit():
             toc_entries[name] = int(page_str)
 
-    subject_norm = re.sub(r'\s+', '', subject)
+    subject_variants = [re.sub(r'\s+', '', v) for v in _search_variants(subject)]
     professor_norm = re.sub(r'\s+', '', professor)
     target_page: int | None = None
     fallback_page: int | None = None
 
     for entry, page in toc_entries.items():
         entry_norm = re.sub(r'\s+', '', entry)
-        if subject_norm and len(subject_norm) > 2 and subject_norm in entry_norm:
-            target_page = page
+        for sv in subject_variants:
+            if sv and len(sv) > 2 and sv in entry_norm:
+                target_page = page
+                break
+        if target_page is not None:
             break
         if professor_norm and professor_norm in entry_norm and fallback_page is None:
             fallback_page = page
@@ -551,22 +572,24 @@ def run_preview(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
-    # 선배족 PDF 확인 (파일명 주차 번호는 작년 기준이라 무의미 — 목차로 과목 탐색)
-    seniors_jungri = find_seniors_pdf_for_subjects('정리족', classes)
-    seniors_chul   = find_seniors_pdf_for_subjects('출족', classes)
-    if not seniors_jungri or not seniors_chul:
+    # 선배족 PDF 전체 목록 수집 (파일명 주차 번호는 작년 기준이라 무의미)
+    all_jungri = list_seniors_pdfs('정리족')
+    all_chul   = list_seniors_pdfs('출족')
+    if not all_jungri or not all_chul:
         missing = []
-        if not seniors_jungri: missing.append("정리족")
-        if not seniors_chul:   missing.append("출족")
+        if not all_jungri: missing.append("정리족")
+        if not all_chul:   missing.append("출족")
         print(f"⚠️  선배족 폴더에 {'/'.join(missing)} PDF가 없습니다.")
         print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
         sys.exit(1)
 
-    # Method A: Python에서 PDF 섹션 사전 추출
-    print(f"  [사전 추출] 선배족 정리족: {os.path.basename(seniors_jungri)}")
-    print(f"  [사전 추출] 선배족 출족:   {os.path.basename(seniors_chul)}\n")
-    jungri_text = extract_pdf_text(seniors_jungri)
-    chul_text = extract_pdf_text(seniors_chul)
+    # Method A: Python에서 모든 선배족 PDF 텍스트 사전 추출
+    print(f"  [사전 추출] 정리족 {len(all_jungri)}개, 출족 {all_chul and len(all_chul)}개")
+    for p in all_jungri + all_chul:
+        print(f"    - {os.path.basename(p)}")
+    print()
+    jungri_texts = [(p, extract_pdf_text(p)) for p in all_jungri]
+    chul_texts   = [(p, extract_pdf_text(p)) for p in all_chul]
 
     jungri_parts: list[str] = []
     chul_parts: list[str] = []
@@ -577,13 +600,21 @@ def run_preview(date_str: str) -> None:
         subject, professor = normalize_subject(c["subject"])
         label = f"{c['period']}교시 {subject}"
 
-        sec_j = find_section_in_pdf(jungri_text, subject, professor)
+        sec_j = None
+        for _, text in jungri_texts:
+            sec_j = find_section_in_pdf(text, subject, professor)
+            if sec_j:
+                break
         if sec_j:
             jungri_parts.append(f"### {label}\n{sec_j}")
         else:
             missing_jungri.append(label)
 
-        sec_c = find_section_in_pdf(chul_text, subject, professor)
+        sec_c = None
+        for _, text in chul_texts:
+            sec_c = find_section_in_pdf(text, subject, professor)
+            if sec_c:
+                break
         if sec_c:
             chul_parts.append(f"### {label}\n{sec_c}")
         else:
@@ -642,8 +673,8 @@ def agent_lecture_integrated(
     lecture_path: str,
     subject: str,
     classes: list[dict],
-    seniors_jungri: str,
-    seniors_chul: str,
+    seniors_jungri_list: list[str],
+    seniors_chul_list: list[str],
 ) -> str:
     subjects_context = "\n".join(f"- {c['subject']}" for c in classes)
     ext = os.path.splitext(lecture_path)[1].lower()
@@ -657,9 +688,21 @@ def agent_lecture_integrated(
             f' > /tmp/new_lecture.txt && cat /tmp/new_lecture.txt'
         )
 
+    jungri_paths = "\n".join(f'- "{p}"' for p in seniors_jungri_list)
+    chul_paths   = "\n".join(f'- "{p}"' for p in seniors_chul_list)
+    jungri_cmds  = "\n".join(
+        f'pdftotext -layout "{p}" /tmp/jungri_lec_{i}.txt && grep -n "{subject}" /tmp/jungri_lec_{i}.txt'
+        for i, p in enumerate(seniors_jungri_list)
+    )
+    chul_cmds    = "\n".join(
+        f'pdftotext -layout "{p}" /tmp/chul_lec_{i}.txt && grep -n "{subject}" /tmp/chul_lec_{i}.txt'
+        for i, p in enumerate(seniors_chul_list)
+    )
+
     prompt = f"""당신은 의과대학 당일 강의록 통합 분석 전문가입니다.
 
 오늘 교수님께서 나눠주신 강의 파일을 선배족 정리족/출족과 비교 분석하세요.
+선배족은 여러 파일로 나뉘어 있으니, 각 파일을 확인해서 "{subject}" 관련 섹션이 있는 파일을 찾으세요.
 
 [오늘 수업 과목] {subject}
 [오늘 전체 수업 목록]
@@ -667,15 +710,19 @@ def agent_lecture_integrated(
 
 [파일 경로]
 - 오늘 강의 파일: {lecture_path}
-- 선배족 정리족: {seniors_jungri}
-- 선배족 출족: {seniors_chul}
+- 선배족 정리족 파일들:
+{jungri_paths}
+- 선배족 출족 파일들:
+{chul_paths}
 
 [작업 순서]
 1. 강의 파일 읽기: {read_instruction}
-2. pdftotext -layout "{seniors_jungri}" /tmp/jungri_lec.txt
-3. grep -n "{subject}" /tmp/jungri_lec.txt 로 정리족 섹션 위치 확인 후 읽기
-4. pdftotext -layout "{seniors_chul}" /tmp/chul_lec.txt
-5. grep -n "{subject}" /tmp/chul_lec.txt 로 출족 섹션 위치 확인 후 읽기
+2. 정리족 파일들에서 "{subject}" 섹션 탐색:
+{jungri_cmds}
+3. 위에서 섹션이 있는 파일의 해당 부분을 읽기
+4. 출족 파일들에서 "{subject}" 섹션 탐색:
+{chul_cmds}
+5. 위에서 섹션이 있는 파일의 해당 부분을 읽기
 6. 세 자료를 비교 분석하여 아래 형식으로 출력
 
 [출력 형식]
@@ -714,13 +761,13 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
         return
     classes = timetable.get("classes", [])
 
-    # 선배족 PDF 확인 (파일명 주차 번호는 작년 기준이라 무의미 — 목차로 과목 탐색)
-    seniors_jungri = find_seniors_pdf_for_subjects('정리족', classes)
-    seniors_chul   = find_seniors_pdf_for_subjects('출족', classes)
-    if not seniors_jungri or not seniors_chul:
+    # 선배족 PDF 전체 목록 수집 (파일명 주차 번호는 작년 기준이라 무의미)
+    all_jungri = list_seniors_pdfs('정리족')
+    all_chul   = list_seniors_pdfs('출족')
+    if not all_jungri or not all_chul:
         missing = []
-        if not seniors_jungri: missing.append("정리족")
-        if not seniors_chul:   missing.append("출족")
+        if not all_jungri: missing.append("정리족")
+        if not all_chul:   missing.append("출족")
         print(f"⚠️  선배족 폴더에 {'/'.join(missing)} PDF가 없습니다.")
         print(f"   → {SENIORS_DIR} 에 파일을 업로드한 뒤 다시 실행해주세요.")
         return
@@ -736,10 +783,10 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
     else:
         print(f"[과목 자동 감지] {subject}")
 
-    print(f"  선배족 정리족: {os.path.basename(seniors_jungri)}")
-    print(f"  선배족 출족:   {os.path.basename(seniors_chul)}\n")
+    print(f"  선배족 정리족: {len(all_jungri)}개 파일")
+    print(f"  선배족 출족:   {len(all_chul)}개 파일\n")
 
-    result = agent_lecture_integrated(lecture_path, subject, classes, seniors_jungri, seniors_chul)
+    result = agent_lecture_integrated(lecture_path, subject, classes, all_jungri, all_chul)
     print("[강의록 통합 Agent] 완료.")
 
     fname = f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}"
