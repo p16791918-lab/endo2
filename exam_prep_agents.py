@@ -24,8 +24,9 @@ from weasyprint import HTML as WeasyHTML
 
 BASE_DIR = "/home/user/endo2"
 TIMETABLE_FILE = os.path.join(BASE_DIR, "2023학년도 1학년 2학기 시간표(안)_231005_공지용.xlsx")
-JUNGRI_PDF = os.path.join(BASE_DIR, "[정리족]내분비학 1차 정리족(2).pdf")
-CHUL_PDF = os.path.join(BASE_DIR, "[출족]내분비학 1차 출족(2) (1).pdf")
+JUNGRI_PDF = os.path.join(BASE_DIR, "족보", "[정리족]내분비학 1차 정리족(2).pdf")
+CHUL_PDF   = os.path.join(BASE_DIR, "족보", "[출족]내분비학 1차 출족(2) (1).pdf")
+SENIORS_DIR = os.path.join(BASE_DIR, "선배족")
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -276,20 +277,23 @@ def run_exam_prep(date_str: str) -> None:
 
     # 결과 저장
     safe_date = date_str.replace("/", "-").replace(" ", "_")
-    output_path = os.path.join(BASE_DIR, f"exam_prep_{safe_date}.md")
+    md_path  = os.path.join(BASE_DIR, "md",  f"exam_prep_{safe_date}.md")
+    pdf_path = os.path.join(BASE_DIR, "복습", f"exam_prep_{safe_date}.pdf")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
 
     subjects_md = "\n".join(
         f"- {c['period']}교시: {c['subject']}" for c in classes
     )
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {timetable['date']} ({timetable['weekday']}요일) 시험 대비\n\n")
         f.write(f"## 수업 목록\n\n{subjects_md}\n\n")
         f.write(f"---\n\n## 정리족 요약\n\n{jungri_result}\n\n")
         f.write(f"---\n\n## 출족 분석\n\n{chul_result}\n\n")
         f.write(f"---\n\n## 강의록 보충\n\n{gangeui_result}\n")
 
-    pdf_path = convert_to_pdf(output_path)
+    output_path = md_path
+    convert_to_pdf(md_path, pdf_path)
     print(f"\n{'='*60}")
     print(f"  결과 저장 완료: {output_path}")
     print(f"  PDF 생성 완료:  {pdf_path}")
@@ -526,18 +530,22 @@ def run_preview(date_str: str) -> None:
         preview_chul = f_chul.result()
         print("[예습 Agent] 출족 완료.")
 
-    output_path = os.path.join(BASE_DIR, f"preview_{safe_filename(date_str)}.md")
+    fname = f"preview_{safe_filename(date_str)}"
+    md_path  = os.path.join(BASE_DIR, "md",  f"{fname}.md")
+    pdf_path = os.path.join(BASE_DIR, "예습", f"{fname}.pdf")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
+
     subjects_md = "\n".join(f"- {c['period']}교시: {c['subject']}" for c in classes)
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {timetable['date']} ({timetable['weekday']}요일) 예습\n\n")
         f.write(f"## 수업 목록\n\n{subjects_md}\n\n")
         f.write(f"---\n\n## 📋 핵심 개념 요약 (정리족)\n\n{preview_jungri}\n\n")
         f.write(f"---\n\n## 🔥 출족 출제 빈도 분석\n\n{preview_chul}\n")
 
-    pdf_path = convert_to_pdf(output_path)
+    convert_to_pdf(md_path, pdf_path)
     print(f"\n{'='*60}")
-    print(f"  결과 저장 완료: {output_path}")
+    print(f"  결과 저장 완료: {md_path}")
     print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
@@ -630,21 +638,21 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
     result = agent_lecture_integrated(lecture_path, subject, classes)
     print("[강의록 통합 Agent] 완료.")
 
-    output_path = os.path.join(
-        BASE_DIR,
-        f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}.md",
-    )
+    fname = f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}"
+    md_path  = os.path.join(BASE_DIR, "md",  f"{fname}.md")
+    pdf_path = os.path.join(BASE_DIR, "복습", f"{fname}.pdf")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# 당일 강의록 통합 분석\n\n")
         f.write(f"**날짜**: {timetable.get('date', date_str)} ({timetable.get('weekday', '')}요일)\n")
         f.write(f"**과목**: {subject}\n")
         f.write(f"**강의 파일**: `{os.path.basename(lecture_path)}`\n\n")
         f.write(f"---\n\n{result}\n")
 
-    pdf_path = convert_to_pdf(output_path)
+    convert_to_pdf(md_path, pdf_path)
     print(f"\n{'='*60}")
-    print(f"  결과 저장 완료: {output_path}")
+    print(f"  결과 저장 완료: {md_path}")
     print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
@@ -813,7 +821,11 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
         print("[비교 Agent] 출족 완료.")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(BASE_DIR, f"compare_{timestamp}.md")
+    fname = f"compare_{timestamp}"
+    md_path  = os.path.join(BASE_DIR, "md",  f"{fname}.md")
+    pdf_path = os.path.join(BASE_DIR, "복습", f"{fname}.pdf")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
+
     range_line = f"**비교 기간**: {date_range}\n" if date_range else ""
 
     changed_section = ""
@@ -821,7 +833,7 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
         lines = "\n".join(f"- 🔄 **{s}**: {d}" for s, d in changed_subjects)
         changed_section = f"---\n\n## ⚠️ 교수 변경 — 비교 제외 수업\n\n{lines}\n\n"
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# 주말 업데이트 비교 분석\n\n")
         f.write(f"**생성 시각**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"{range_line}")
@@ -831,9 +843,9 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None) 
         f.write(f"---\n\n{compare_jungri}\n\n")
         f.write(f"---\n\n{compare_chul}\n")
 
-    pdf_path = convert_to_pdf(output_path)
+    convert_to_pdf(md_path, pdf_path)
     print(f"\n{'='*60}")
-    print(f"  결과 저장 완료: {output_path}")
+    print(f"  결과 저장 완료: {md_path}")
     print(f"  PDF 생성 완료:  {pdf_path}")
     print(f"{'='*60}\n")
 
@@ -924,8 +936,11 @@ strong { color: #c0392b; }
 """
 
 
-def convert_to_pdf(md_path: str) -> str:
+def convert_to_pdf(md_path: str, pdf_path: str | None = None) -> str:
     """마크다운 파일을 PDF로 변환하고 PDF 경로를 반환한다."""
+    if pdf_path is None:
+        pdf_path = md_path.replace(".md", ".pdf")
+    os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
     with open(md_path, encoding="utf-8") as f:
         md_text = f.read()
 
@@ -943,7 +958,6 @@ def convert_to_pdf(md_path: str) -> str:
 <body>{body_html}</body>
 </html>"""
 
-    pdf_path = md_path.replace(".md", ".pdf")
     WeasyHTML(string=html, base_url=BASE_DIR).write_pdf(pdf_path)
     return pdf_path
 
