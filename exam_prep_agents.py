@@ -425,7 +425,7 @@ def agent_preview_jungri(classes: list[dict], sections_text: str) -> str:
 
 예습용이므로 각 수업 15줄 이내로 간결하게."""
 
-    return run_claude(prompt, "예습 정리족 Agent", timeout=300, allowed_tools="none")
+    return run_claude(prompt, "예습 정리족 Agent", timeout=600, allowed_tools="none")
 
 
 def agent_preview_chul(classes: list[dict], sections_text: str) -> str:
@@ -452,7 +452,7 @@ def agent_preview_chul(classes: list[dict], sections_text: str) -> str:
 
 출 빈도 별점을 반드시 포함하세요."""
 
-    return run_claude(prompt, "예습 출족 Agent", timeout=300, allowed_tools="none")
+    return run_claude(prompt, "예습 출족 Agent", timeout=600, allowed_tools="none")
 
 
 def run_preview(date_str: str) -> None:
