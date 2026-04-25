@@ -25,7 +25,7 @@ from weasyprint import HTML as WeasyHTML
 BASE_DIR = "/home/user/endo2"
 TIMETABLE_FILE = os.path.join(BASE_DIR, "2023학년도 1학년 2학기 시간표(안)_231005_공지용.xlsx")
 JUNGRI_PDF = os.path.join(BASE_DIR, "[정리족]내분비학 1차 정리족(2).pdf")
-CHUL_PDF = os.path.join(BASE_DIR, "[출족]내분비학 1차 출족(2).pdf")
+CHUL_PDF = os.path.join(BASE_DIR, "[출족]내분비학 1차 출족(2) (1).pdf")
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -94,15 +94,16 @@ def agent_timetable(date_str: str) -> dict:
 # Claude CLI 실행 헬퍼
 # ---------------------------------------------------------------------------
 
-def run_claude(prompt: str, agent_name: str, timeout: int = 600) -> str:
+def run_claude(prompt: str, agent_name: str, timeout: int = 600, allowed_tools: str = "Bash,Read") -> str:
     """claude -p 로 서브에이전트를 실행하고 결과를 반환한다."""
     try:
+        tools_args = ["--allowedTools", allowed_tools] if allowed_tools and allowed_tools != "none" else []
         result = subprocess.run(
             [
                 "claude",
                 "--print",
                 prompt,
-                "--allowedTools", "Bash,Read",
+                *tools_args,
                 "--output-format", "text",
             ],
             capture_output=True,
@@ -309,11 +310,101 @@ def detect_subject_from_filename(lecture_path: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+_pdf_text_cache: dict[str, str] = {}
+
+
+def extract_pdf_text(pdf_path: str) -> str:
+    """PDF를 텍스트로 변환 (mtime 기반 디스크 캐시 사용)."""
+    if pdf_path in _pdf_text_cache:
+        return _pdf_text_cache[pdf_path]
+    cache_file = f"/tmp/endo2_{os.path.basename(pdf_path)}.txt"
+    if os.path.exists(cache_file) and os.path.getmtime(cache_file) >= os.path.getmtime(pdf_path):
+        with open(cache_file, encoding="utf-8") as f:
+            text = f.read()
+    else:
+        print(f"  [PDF 추출 중] {os.path.basename(pdf_path)}...")
+        r = subprocess.run(
+            ["pdftotext", "-layout", pdf_path, "-"],
+            capture_output=True, text=True,
+        )
+        text = r.stdout
+        with open(cache_file, "w", encoding="utf-8") as f:
+            f.write(text)
+    _pdf_text_cache[pdf_path] = text
+    return text
+
+
+def normalize_subject(raw: str) -> tuple[str, str]:
+    """'(내분비학)갑상샘 기능 조절약물-김치대' → ('갑상샘 기능 조절약물', '김치대')"""
+    s = re.sub(r'^\([^)]+\)', '', raw).strip()
+    parts = s.rsplit('-', 1)
+    return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else (s.strip(), '')
+
+
+def find_section_in_pdf(full_text: str, subject: str, professor: str) -> str | None:
+    """목차에서 과목/교수 위치를 찾아 해당 섹션만 반환. 못 찾으면 None."""
+    toc_area = full_text[:4000]
+    toc_entries: dict[str, int] = {}
+    for m in re.finditer(r'([^\n·.]+?)\s*[·.]{4,}\s*p\s*[.\s]*(\d+)', toc_area):
+        name = m.group(1).strip()
+        page_str = re.sub(r'\s+', '', m.group(2))
+        if page_str.isdigit():
+            toc_entries[name] = int(page_str)
+
+    subject_norm = re.sub(r'\s+', '', subject)
+    professor_norm = re.sub(r'\s+', '', professor)
+    target_page: int | None = None
+    fallback_page: int | None = None
+
+    for entry, page in toc_entries.items():
+        entry_norm = re.sub(r'\s+', '', entry)
+        if subject_norm and len(subject_norm) > 2 and subject_norm in entry_norm:
+            target_page = page
+            break
+        if professor_norm and professor_norm in entry_norm and fallback_page is None:
+            fallback_page = page
+
+    if target_page is None:
+        target_page = fallback_page
+    if target_page is None:
+        return None
+
+    all_pages = sorted(set(toc_entries.values()))
+    try:
+        idx = all_pages.index(target_page)
+    except ValueError:
+        return None
+
+    next_page = all_pages[idx + 1] if idx + 1 < len(all_pages) else None
+
+    def _find_marker(text, page_num, search_from=0):
+        for offset in range(4):
+            pat = re.compile(r'\n[ \t]*-[ \t]*' + str(page_num + offset) + r'[ \t]*-[ \t]*\n')
+            m = pat.search(text, search_from)
+            if m:
+                return m
+        return None
+
+    start_m = _find_marker(full_text, target_page)
+    if not start_m:
+        return None
+    start = start_m.end()
+
+    if next_page:
+        end_m = _find_marker(full_text, next_page, start)
+        end = end_m.start() if end_m else len(full_text)
+    else:
+        end = len(full_text)
+
+    section = full_text[start:end].strip()
+    return section if len(section) > 100 else None
+
+
 # ---------------------------------------------------------------------------
 # Feature 1: 예습 (preview)
 # ---------------------------------------------------------------------------
 
-def agent_preview_jungri(classes: list[dict]) -> str:
+def agent_preview_jungri(classes: list[dict], sections_text: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
     prompt = f"""당신은 의과대학 예습 도우미입니다. 내일 수업을 빠르게 예습할 수 있도록 핵심만 간결하게 정리하세요.
@@ -321,13 +412,10 @@ def agent_preview_jungri(classes: list[dict]) -> str:
 [내일 수업 목록]
 {subjects}
 
-[정리족 파일]
-{JUNGRI_PDF}
+[정리족 추출 텍스트]
+아래는 각 수업 해당 섹션의 정리족 내용입니다.
 
-[작업 순서]
-1. pdftotext -layout "{JUNGRI_PDF}" /tmp/jungri_preview.txt
-2. head -n 200 /tmp/jungri_preview.txt 로 목차 확인
-3. 각 수업 섹션을 찾아 읽되 핵심만 추출 (P 표시 위주)
+{sections_text}
 
 [출력 형식 — 수업마다]
 ## [수업명]
@@ -337,10 +425,10 @@ def agent_preview_jungri(classes: list[dict]) -> str:
 
 예습용이므로 각 수업 15줄 이내로 간결하게."""
 
-    return run_claude(prompt, "예습 정리족 Agent", timeout=300)
+    return run_claude(prompt, "예습 정리족 Agent", timeout=300, allowed_tools="none")
 
 
-def agent_preview_chul(classes: list[dict]) -> str:
+def agent_preview_chul(classes: list[dict], sections_text: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
     prompt = f"""당신은 의과대학 기출 출제 경향 분석가입니다. 내일 수업의 출족 여부를 분석하세요.
@@ -350,13 +438,10 @@ def agent_preview_chul(classes: list[dict]) -> str:
 [내일 수업 목록]
 {subjects}
 
-[출족 파일]
-{CHUL_PDF}
+[출족 추출 텍스트]
+아래는 각 수업 해당 섹션의 출족 내용입니다.
 
-[작업 순서]
-1. pdftotext -layout "{CHUL_PDF}" /tmp/chul_preview.txt
-2. head -n 200 /tmp/chul_preview.txt 로 목차 확인
-3. 각 수업 관련 섹션을 찾아 기출 빈도 파악
+{sections_text}
 
 [출력 형식 — 수업마다]
 ## [수업명]
@@ -367,7 +452,7 @@ def agent_preview_chul(classes: list[dict]) -> str:
 
 출 빈도 별점을 반드시 포함하세요."""
 
-    return run_claude(prompt, "예습 출족 Agent", timeout=300)
+    return run_claude(prompt, "예습 출족 Agent", timeout=300, allowed_tools="none")
 
 
 def run_preview(date_str: str) -> None:
@@ -389,10 +474,52 @@ def run_preview(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
+    # Method A: Python에서 PDF 섹션 사전 추출
+    print("  [사전 추출] 정리족/출족 PDF 섹션 추출 중...\n")
+    jungri_text = extract_pdf_text(JUNGRI_PDF)
+    chul_text = extract_pdf_text(CHUL_PDF)
+
+    jungri_parts: list[str] = []
+    chul_parts: list[str] = []
+    missing_jungri: list[str] = []
+    missing_chul: list[str] = []
+
+    for c in classes:
+        subject, professor = normalize_subject(c["subject"])
+        label = f"{c['period']}교시 {subject}"
+
+        sec_j = find_section_in_pdf(jungri_text, subject, professor)
+        if sec_j:
+            jungri_parts.append(f"### {label}\n{sec_j}")
+        else:
+            missing_jungri.append(label)
+
+        sec_c = find_section_in_pdf(chul_text, subject, professor)
+        if sec_c:
+            chul_parts.append(f"### {label}\n{sec_c}")
+        else:
+            missing_chul.append(label)
+
+    if missing_jungri or missing_chul:
+        print("\n⚠️  다음 수업의 섹션을 PDF에서 찾을 수 없습니다. 확인 후 다시 실행해주세요.\n")
+        if missing_jungri:
+            print("  [정리족 미발견]")
+            for s in missing_jungri:
+                print(f"    - {s}")
+        if missing_chul:
+            print("\n  [출족 미발견]")
+            for s in missing_chul:
+                print(f"    - {s}")
+        print()
+        sys.exit(1)
+
+    jungri_sections_text = "\n\n".join(jungri_parts)
+    chul_sections_text = "\n\n".join(chul_parts)
+
     print("예습 에이전트 병렬 실행 중 (정리족 요약 / 출족 빈도)...\n")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_jungri = executor.submit(agent_preview_jungri, classes)
-        f_chul = executor.submit(agent_preview_chul, classes)
+        f_jungri = executor.submit(agent_preview_jungri, classes, jungri_sections_text)
+        f_chul = executor.submit(agent_preview_chul, classes, chul_sections_text)
         preview_jungri = f_jungri.result()
         print("[예습 Agent] 정리족 완료.")
         preview_chul = f_chul.result()
