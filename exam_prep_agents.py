@@ -808,6 +808,50 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
     print(f"{'='*60}\n")
 
 
+def run_lecture_daily(date_str: str) -> None:
+    """강의록/ 폴더에서 date_str 날짜 파일을 찾아 3개씩 병렬로 복습 자료 생성."""
+    gangeui_dir = os.path.join(BASE_DIR, "강의록")
+    if not os.path.isdir(gangeui_dir):
+        print(f"오류: 강의록 폴더가 없습니다: {gangeui_dir}")
+        return
+
+    try:
+        d = datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        prefix = d.strftime("%y%m%d")
+    except ValueError:
+        print(f"오류: 날짜 형식이 올바르지 않습니다: {date_str}")
+        return
+
+    files = sorted(
+        os.path.join(gangeui_dir, f)
+        for f in os.listdir(gangeui_dir)
+        if (f.endswith(".pdf") or f.endswith(".pptx")) and f.startswith(prefix)
+    )
+    if not files:
+        print(f"강의록/ 폴더에서 {date_str}({prefix}*) 파일을 찾을 수 없습니다.")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  강의록 일괄 처리: {date_str} ({len(files)}개, max 3개 병렬)")
+    print(f"{'='*60}\n")
+    for f in files:
+        print(f"  - {os.path.basename(f)}")
+    print()
+
+    def _process(lecture_path: str) -> None:
+        try:
+            run_lecture(lecture_path, date_str)
+        except Exception as e:
+            print(f"[오류] {os.path.basename(lecture_path)}: {e}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        list(executor.map(_process, files))
+
+    print(f"\n{'='*60}")
+    print(f"  전체 완료: {len(files)}개 처리")
+    print(f"{'='*60}\n")
+
+
 # ---------------------------------------------------------------------------
 # Feature 3: 주말 업데이트 비교 (compare)
 # ---------------------------------------------------------------------------
@@ -1354,7 +1398,7 @@ def convert_to_pdf(md_path: str, pdf_path: str | None = None) -> str:
 if __name__ == "__main__":
     args = sys.argv[1:]
 
-    if not args or args[0] not in ("preview", "lecture", "compare", "compare-detect", "compare-run", "compare-daily"):
+    if not args or args[0] not in ("preview", "lecture", "lecture-daily", "compare", "compare-detect", "compare-run", "compare-daily"):
         run_exam_prep(args[0] if args else "2023-10-23")
 
     elif args[0] == "preview":
@@ -1365,6 +1409,10 @@ if __name__ == "__main__":
         if len(args) < 2:
             sys.exit("Usage: python exam_prep_agents.py lecture <강의파일경로> [date]")
         run_lecture(args[1], args[2] if len(args) >= 3 else date.today().strftime("%Y-%m-%d"))
+
+    elif args[0] == "lecture-daily":
+        d = args[1] if len(args) >= 2 else date.today().strftime("%Y-%m-%d")
+        run_lecture_daily(d)
 
     elif args[0] == "compare":
         if len(args) < 3:
