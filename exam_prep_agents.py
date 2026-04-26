@@ -845,17 +845,56 @@ REMOVED: [수업명] | [구버전 교수명]"""
     return run_claude(prompt, "교수 변경 감지 Agent", timeout=300)
 
 
-def parse_professor_changes(agent_output: str) -> list[tuple[str, str]]:
-    """'CHANGED: 수업명 | 구교수 → 신교수' 라인을 파싱해 [(수업명, 설명)] 리스트 반환."""
-    changed = []
+def parse_professor_changes(agent_output: str) -> list[dict]:
+    """감지 결과를 구조화하여 반환.
+    Returns list of {subject, kind, old_prof, new_prof}
+    kind: 'CHANGED' | 'NEW' | 'REMOVED'
+    """
+    results = []
     for line in agent_output.splitlines():
         line = line.strip()
-        if line.startswith("CHANGED:") or line.startswith("NEW:") or line.startswith("REMOVED:"):
-            parts = line.split("|", 1)
-            subject_part = parts[0].split(":", 1)[1].strip()
-            detail = parts[1].strip() if len(parts) > 1 else ""
-            changed.append((subject_part, f"{line.split(':')[0]}: {detail}"))
-    return changed
+        for kind in ('CHANGED', 'NEW', 'REMOVED'):
+            if line.startswith(f'{kind}:'):
+                parts = line.split('|', 1)
+                subject = parts[0].split(':', 1)[1].strip()
+                detail = parts[1].strip() if len(parts) > 1 else ''
+                old_prof, new_prof = '', ''
+                if kind == 'CHANGED' and '→' in detail:
+                    old_prof, new_prof = [p.strip() for p in detail.split('→', 1)]
+                elif kind == 'NEW':
+                    new_prof = detail
+                elif kind == 'REMOVED':
+                    old_prof = detail
+                results.append({'subject': subject, 'kind': kind,
+                                 'old_prof': old_prof, 'new_prof': new_prof})
+                break
+    return results
+
+
+def classify_changes(changes: list[dict]) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """변경 목록을 세 가지로 분류.
+    Returns:
+        jungri_skip: 정리족에서 제외할 수업 (교수 바뀐 경우 전부)
+        chul_skip: 출족에서 완전 제외할 수업 (REMOVED 중 신임 없는 경우)
+        new_prof_checks: 출족에서 신임 교수 기출 확인할 (수업, 신임교수) 목록
+    """
+    new_profs = {r['new_prof'] for r in changes if r['kind'] == 'NEW' and r['new_prof']}
+    old_profs_of_removed = {r['old_prof'] for r in changes if r['kind'] == 'REMOVED' and r['old_prof']}
+
+    jungri_skip = [r['subject'] for r in changes]
+    chul_skip = []
+    new_prof_checks = []
+
+    for r in changes:
+        if r['kind'] == 'CHANGED':
+            new_prof_checks.append((r['subject'], r['new_prof']))
+        elif r['kind'] == 'REMOVED':
+            # 같은 교수가 NEW로도 나타나면 수업명 통합 → 출족 제외 불필요
+            if r['old_prof'] not in new_profs:
+                chul_skip.append(r['subject'])
+        # NEW: 같은 교수가 REMOVED에도 있으면 수업명 통합이므로 출족 유지
+
+    return jungri_skip, chul_skip, new_prof_checks
 
 
 def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None, skip_subjects: list[str]) -> str:
@@ -912,12 +951,21 @@ def agent_compare_jungri(new_jungri_pdf: str, date_range: str | None, skip_subje
     return run_claude(prompt, "정리족 비교 Agent", timeout=600)
 
 
-def agent_compare_chul(new_chul_pdf: str, date_range: str | None, skip_subjects: list[str]) -> str:
+def agent_compare_chul(new_chul_pdf: str, date_range: str | None, skip_subjects: list[str],
+                       new_prof_checks: list[tuple[str, str]] | None = None) -> str:
     focus = f"\n⚠️ 특히 {date_range} 해당 내용에 집중하세요." if date_range else ""
     skip_note = (
-        f"\n\n⛔ 아래 수업은 교수님이 바뀌어 비교 불가 — 완전히 건너뛰세요:\n"
+        f"\n\n⛔ 아래 수업은 완전히 건너뛰세요 (신임 교수 기출도 없음):\n"
         + "\n".join(f"- {s}" for s in skip_subjects)
     ) if skip_subjects else ""
+    new_prof_note = ""
+    if new_prof_checks:
+        lines = "\n".join(f"- {subj} (신임: {prof})" for subj, prof in new_prof_checks)
+        new_prof_note = (
+            f"\n\n⚡ 아래 수업은 교수님이 바뀌었습니다. 신버전과의 비교는 생략하고, "
+            f"선배족 출족에서 신임 교수님 이름으로 이전 기출이 있는지만 확인하세요.\n"
+            f"있으면 문제를 수록하고, 없으면 '기출 없음'으로 표시하세요:\n{lines}"
+        )
 
     old_chul_list = list_seniors_pdfs('출족')
     old_chul_str = "\n".join(f'- "{p}"' for p in old_chul_list)
@@ -932,7 +980,7 @@ def agent_compare_chul(new_chul_pdf: str, date_range: str | None, skip_subjects:
 
     prompt = f"""당신은 의과대학 출족 버전 비교 전문가입니다.
 작년 선배족(구버전)과 올해 새 출족(신버전)을 비교하세요.
-가장 중요한 것은 **올해 새로 추가된 기출문제**입니다. 삭제된 문제는 간략히만 언급하세요.{focus}{skip_note}
+가장 중요한 것은 **올해 새로 추가된 기출문제**입니다. 삭제된 문제는 간략히만 언급하세요.{focus}{skip_note}{new_prof_note}
 
 [구버전 출족 파일들 (작년 선배족)]
 {old_chul_str}
@@ -987,20 +1035,32 @@ def run_compare_detect(new_jungri_pdf: str) -> None:
     if not changed_subjects:
         print("✅ 교수 변경 없음\n")
     else:
-        print("⚠️  아래 수업에서 변경이 감지됐습니다. 비교에서 제외할지 확인해주세요:\n")
-        for subject, detail in changed_subjects:
-            print(f"  🔄 {subject}: {detail}")
+        jungri_skip, chul_skip, new_prof_checks = classify_changes(changed_subjects)
+        print("⚠️  아래 수업에서 변경이 감지됐습니다:\n")
+        for r in changed_subjects:
+            if r['kind'] == 'CHANGED':
+                print(f"  🔄 {r['subject']}: {r['old_prof']} → {r['new_prof']}  (정리족 제외 / 출족 신임 기출 확인)")
+            elif r['kind'] == 'NEW':
+                merged = r['new_prof'] in {x['old_prof'] for x in changed_subjects if x['kind'] == 'REMOVED'}
+                tag = "(수업명 통합으로 보임 — 포함 권장)" if merged else "(신규 수업)"
+                print(f"  ➕ {r['subject']}: {r['new_prof']}  {tag}")
+            elif r['kind'] == 'REMOVED':
+                merged = r['old_prof'] in {x['new_prof'] for x in changed_subjects if x['kind'] == 'NEW'}
+                tag = "(수업명 통합으로 보임 — 포함 권장)" if merged else "(삭제됨)"
+                print(f"  ➖ {r['subject']}: {r['old_prof']}  {tag}")
         print()
-        skip_csv = ",".join(s for s, _ in changed_subjects)
-        print(f"모두 제외하려면:")
-        print(f'  python exam_prep_agents.py compare-run <jungri> <chul> [range] "{skip_csv}"')
-        print(f"제외 없이 전체 비교:")
-        print(f'  python exam_prep_agents.py compare-run <jungri> <chul> [range] ""')
+        jungri_skip_csv = ",".join(jungri_skip)
+        chul_skip_csv   = ",".join(chul_skip)
+        new_prof_csv    = ",".join(f"{s}:{p}" for s, p in new_prof_checks)
+        print("확인 후 아래 명령으로 실행하세요:")
+        print(f'  python exam_prep_agents.py compare-run <jungri> <chul> "<range>" "{jungri_skip_csv}" "{chul_skip_csv}" "{new_prof_csv}"')
 
 
 def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None,
-                skip_csv: str | None = None) -> None:
-    """skip_csv가 주어지면 감지 단계 생략, 직접 지정한 목록으로 비교 실행."""
+                jungri_skip_csv: str | None = None,
+                chul_skip_csv: str | None = None,
+                new_prof_csv: str | None = None) -> None:
+    """jungri_skip_csv 등이 주어지면 감지 단계 생략, 직접 지정한 목록으로 비교 실행."""
     print(f"\n{'='*60}")
     print(f"  주말 업데이트 비교 시작")
     if date_range:
@@ -1012,34 +1072,42 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None,
             print(f"오류: {label} 파일을 찾을 수 없습니다: {path}")
             return
 
-    if skip_csv is None:
-        # 자동 감지 (처음 실행 시 — compare-detect로 먼저 확인 권장)
+    if jungri_skip_csv is None:
+        # 자동 감지 (compare-detect로 먼저 확인 권장)
         print("[사전 검사] 교수 변경 여부 감지 중...\n")
         prof_output = agent_detect_professor_changes(new_jungri_pdf)
-        changed_subjects = parse_professor_changes(prof_output)
-        skip_subjects = [s for s, _ in changed_subjects]
-        if changed_subjects:
+        changes = parse_professor_changes(prof_output)
+        if changes:
             print("⚠️  교수 변경 감지 — 자동으로 비교를 중단합니다.")
-            print("   compare-detect 명령으로 결과를 확인하고,")
-            print("   compare-run 명령으로 제외 목록을 직접 지정해 실행해주세요.\n")
-            for subject, detail in changed_subjects:
-                print(f"  🔄 {subject}: {detail}")
-            skip_csv_out = ",".join(skip_subjects)
-            print(f'\n모두 제외: python exam_prep_agents.py compare-run "{new_jungri_pdf}" "{new_chul_pdf}" "{date_range or ""}" "{skip_csv_out}"')
+            print("   compare-detect 명령으로 결과를 확인한 뒤 compare-run으로 실행해주세요.\n")
+            jungri_skip, chul_skip, new_prof_checks = classify_changes(changes)
+            npc = ",".join(f"{s}:{p}" for s, p in new_prof_checks)
+            print(f'  python exam_prep_agents.py compare-run "{new_jungri_pdf}" "{new_chul_pdf}" "{date_range or ""}" "{",".join(jungri_skip)}" "{",".join(chul_skip)}" "{npc}"')
             return
         else:
             print("✅ 교수 변경 없음 — 전체 비교 진행합니다.\n")
+            jungri_skip, chul_skip, new_prof_checks = [], [], []
     else:
-        skip_subjects = [s.strip() for s in skip_csv.split(",") if s.strip()]
-        if skip_subjects:
-            print(f"제외 수업: {', '.join(skip_subjects)}\n")
-        else:
-            print("제외 수업 없음 — 전체 비교 진행합니다.\n")
+        jungri_skip = [s.strip() for s in jungri_skip_csv.split(",") if s.strip()]
+        chul_skip   = [s.strip() for s in (chul_skip_csv or "").split(",") if s.strip()]
+        new_prof_checks = []
+        for item in (new_prof_csv or "").split(","):
+            item = item.strip()
+            if ":" in item:
+                s, p = item.split(":", 1)
+                new_prof_checks.append((s.strip(), p.strip()))
+        if jungri_skip:
+            print(f"정리족 제외: {', '.join(jungri_skip)}")
+        if chul_skip:
+            print(f"출족 완전 제외: {', '.join(chul_skip)}")
+        if new_prof_checks:
+            print(f"출족 신임 기출 확인: {', '.join(f'{s}({p})' for s,p in new_prof_checks)}")
+        print()
 
     print("비교 에이전트 병렬 실행 중 (정리족 / 출족)...\n")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        f_jungri = executor.submit(agent_compare_jungri, new_jungri_pdf, date_range, skip_subjects)
-        f_chul = executor.submit(agent_compare_chul, new_chul_pdf, date_range, skip_subjects)
+        f_jungri = executor.submit(agent_compare_jungri, new_jungri_pdf, date_range, jungri_skip)
+        f_chul   = executor.submit(agent_compare_chul,   new_chul_pdf,   date_range, chul_skip, new_prof_checks)
         compare_jungri = f_jungri.result()
         print("[비교 Agent] 정리족 완료.")
         compare_chul = f_chul.result()
@@ -1054,9 +1122,12 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None,
 
     range_line = f"**비교 기간**: {date_range}\n" if date_range else ""
     skip_section = ""
-    if skip_subjects:
-        lines = "\n".join(f"- {s}" for s in skip_subjects)
-        skip_section = f"---\n\n## ⚠️ 비교 제외 수업\n\n{lines}\n\n"
+    all_skipped = list(dict.fromkeys(jungri_skip + chul_skip))
+    if all_skipped or new_prof_checks:
+        lines = "\n".join(f"- {s} (정리족 제외)" for s in jungri_skip)
+        if new_prof_checks:
+            lines += "\n" + "\n".join(f"- {s}: 교수 변경 → {p} 기출 확인" for s, p in new_prof_checks)
+        skip_section = f"---\n\n## ⚠️ 교수 변경 처리 내역\n\n{lines}\n\n"
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# 주말 업데이트 비교 분석\n\n")
@@ -1218,7 +1289,11 @@ if __name__ == "__main__":
 
     elif args[0] == "compare-run":
         if len(args) < 3:
-            sys.exit("Usage: python exam_prep_agents.py compare-run <new_jungri.pdf> <new_chul.pdf> [날짜범위] [제외수업CSV]")
-        run_compare(args[1], args[2],
-                    args[3] if len(args) >= 4 else None,
-                    args[4] if len(args) >= 5 else "")
+            sys.exit("Usage: python exam_prep_agents.py compare-run <jungri> <chul> [range] [jungri_skip] [chul_skip] [new_prof_csv]")
+        run_compare(
+            args[1], args[2],
+            args[3] if len(args) >= 4 else None,
+            args[4] if len(args) >= 5 else "",
+            args[5] if len(args) >= 6 else "",
+            args[6] if len(args) >= 7 else "",
+        )
