@@ -1147,6 +1147,95 @@ def run_compare(new_jungri_pdf: str, new_chul_pdf: str, date_range: str | None,
 
 
 # ---------------------------------------------------------------------------
+# compare-daily: 여러 파일 쌍을 병렬 비교 후 결과 통합
+# ---------------------------------------------------------------------------
+
+def run_compare_daily(pairs: list[tuple[str, str]], date_range: str | None,
+                      jungri_skip_csv: str = "", chul_skip_csv: str = "",
+                      new_prof_csv: str = "") -> None:
+    """파일 쌍 목록을 병렬로 비교하고 결과를 하나의 파일로 통합.
+    pairs: [(jungri_pdf, chul_pdf), ...]
+    """
+    print(f"\n{'='*60}")
+    print(f"  하루 전체 비교 시작 ({len(pairs)}쌍 병렬)")
+    if date_range:
+        print(f"  대상 기간: {date_range}")
+    print(f"{'='*60}\n")
+
+    for jungri, chul in pairs:
+        for path, label in [(jungri, "정리족"), (chul, "출족")]:
+            if not os.path.exists(path):
+                print(f"오류: {label} 파일을 찾을 수 없습니다: {path}")
+                return
+
+    jungri_skip    = [s.strip() for s in jungri_skip_csv.split(",") if s.strip()]
+    chul_skip      = [s.strip() for s in chul_skip_csv.split(",") if s.strip()]
+    new_prof_checks = []
+    for item in new_prof_csv.split(","):
+        item = item.strip()
+        if ":" in item:
+            s, p = item.split(":", 1)
+            new_prof_checks.append((s.strip(), p.strip()))
+
+    if jungri_skip:
+        print(f"정리족 제외: {', '.join(jungri_skip)}")
+    if chul_skip:
+        print(f"출족 완전 제외: {', '.join(chul_skip)}")
+    if new_prof_checks:
+        print(f"출족 신임 기출 확인: {', '.join(f'{s}({p})' for s,p in new_prof_checks)}")
+    print()
+
+    def _run_pair(jungri: str, chul: str) -> tuple[str, str]:
+        label = f"{os.path.basename(jungri)} / {os.path.basename(chul)}"
+        print(f"  [{label}] 비교 시작...")
+        jungri_result = agent_compare_jungri(jungri, date_range, jungri_skip)
+        chul_result   = agent_compare_chul(chul, date_range, chul_skip, new_prof_checks)
+        print(f"  [{label}] 완료.")
+        return jungri_result, chul_result
+
+    print(f"병렬 실행 중 ({len(pairs)}쌍 × 2 에이전트)...\n")
+    pair_results: list[tuple[str, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(pairs) * 2) as executor:
+        futures = [executor.submit(_run_pair, j, c) for j, c in pairs]
+        for f in concurrent.futures.as_completed(futures):
+            pair_results.append(f.result())
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname    = f"compare_{timestamp}"
+    md_path  = os.path.join(BASE_DIR, "md",  f"{fname}.md")
+    pdf_path = os.path.join(BASE_DIR, "비교", f"{fname}.pdf")
+    os.makedirs(os.path.dirname(md_path), exist_ok=True)
+    os.makedirs(os.path.join(BASE_DIR, "비교"), exist_ok=True)
+
+    range_line = f"**비교 기간**: {date_range}\n" if date_range else ""
+    skip_section = ""
+    if jungri_skip or new_prof_checks:
+        lines = "\n".join(f"- {s} (정리족 제외)" for s in jungri_skip)
+        if new_prof_checks:
+            lines += "\n" + "\n".join(f"- {s}: 교수 변경 → {p} 기출 확인" for s, p in new_prof_checks)
+        skip_section = f"---\n\n## ⚠️ 교수 변경 처리 내역\n\n{lines}\n\n"
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(f"# 주말 업데이트 비교 분석\n\n")
+        f.write(f"**생성 시각**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"{range_line}")
+        for j, c in pairs:
+            f.write(f"- 정리족: `{os.path.basename(j)}` / 출족: `{os.path.basename(c)}`\n")
+        f.write(f"\n{skip_section}")
+        for i, (jungri_result, chul_result) in enumerate(pair_results, 1):
+            j, c = pairs[i - 1]
+            f.write(f"---\n\n# {i}부: {os.path.basename(j)}\n\n")
+            f.write(f"{jungri_result}\n\n")
+            f.write(f"---\n\n{chul_result}\n\n")
+
+    convert_to_pdf(md_path, pdf_path)
+    print(f"\n{'='*60}")
+    print(f"  결과 저장 완료: {md_path}")
+    print(f"  PDF 생성 완료:  {pdf_path}")
+    print(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
 # PDF 변환
 # ---------------------------------------------------------------------------
 
@@ -1265,7 +1354,7 @@ def convert_to_pdf(md_path: str, pdf_path: str | None = None) -> str:
 if __name__ == "__main__":
     args = sys.argv[1:]
 
-    if not args or args[0] not in ("preview", "lecture", "compare", "compare-detect", "compare-run"):
+    if not args or args[0] not in ("preview", "lecture", "compare", "compare-detect", "compare-run", "compare-daily"):
         run_exam_prep(args[0] if args else "2023-10-23")
 
     elif args[0] == "preview":
@@ -1296,4 +1385,23 @@ if __name__ == "__main__":
             args[4] if len(args) >= 5 else "",
             args[5] if len(args) >= 6 else "",
             args[6] if len(args) >= 7 else "",
+        )
+
+    elif args[0] == "compare-daily":
+        # Usage: compare-daily <j1> <c1> [<j2> <c2> ...] -- [range] [jungri_skip] [chul_skip] [new_prof_csv]
+        # 파일 쌍은 "--" 구분자 앞, 나머지 옵션은 뒤
+        if len(args) < 3:
+            sys.exit("Usage: python exam_prep_agents.py compare-daily <j1> <c1> [<j2> <c2> ...] [-- range jungri_skip chul_skip new_prof_csv]")
+        sep = args.index("--") if "--" in args else len(args)
+        file_args = args[1:sep]
+        opt_args  = args[sep + 1:] if sep < len(args) else []
+        if len(file_args) % 2 != 0:
+            sys.exit("파일 쌍이 맞지 않습니다. 정리족/출족 쌍으로 입력해주세요.")
+        pairs = [(file_args[i], file_args[i + 1]) for i in range(0, len(file_args), 2)]
+        run_compare_daily(
+            pairs,
+            opt_args[0] if len(opt_args) >= 1 else None,
+            opt_args[1] if len(opt_args) >= 2 else "",
+            opt_args[2] if len(opt_args) >= 3 else "",
+            opt_args[3] if len(opt_args) >= 4 else "",
         )
