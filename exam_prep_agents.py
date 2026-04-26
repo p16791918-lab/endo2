@@ -284,8 +284,8 @@ def run_exam_prep(date_str: str) -> None:
 
     # 결과 저장
     safe_date = date_str.replace("/", "-").replace(" ", "_")
-    md_path  = os.path.join(BASE_DIR, "md",  f"exam_prep_{safe_date}.md")
-    pdf_path = os.path.join(BASE_DIR, "복습", f"exam_prep_{safe_date}.pdf")
+    md_path  = os.path.join(BASE_DIR, "md",      f"exam_prep_{safe_date}.md")
+    pdf_path = os.path.join(BASE_DIR, "시험대비", f"exam_prep_{safe_date}.pdf")
     os.makedirs(os.path.dirname(md_path), exist_ok=True)
 
     subjects_md = "\n".join(
