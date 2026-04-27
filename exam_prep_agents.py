@@ -127,13 +127,20 @@ def run_claude(prompt: str, agent_name: str, timeout: int = 600, allowed_tools: 
 # Agent 2: 정리족
 # ---------------------------------------------------------------------------
 
-def agent_jungri(classes: list[dict], jungri_pdf: str) -> str:
+def agent_jungri(classes: list[dict], jungri_pdf: str, skip_subjects: list[str] | None = None) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
+    skip_note = ""
+    if skip_subjects:
+        skip_list = "\n".join(f"- {s}" for s in skip_subjects)
+        skip_note = f"""
+⛔ 아래 수업은 교수님이 바뀌어 정리족 내용이 의미 없으므로 완전히 건너뛰세요:
+{skip_list}
+"""
 
     prompt = f"""당신은 의과대학 시험 대비 정리족 분석 전문가입니다.
 
 아래 수업들의 내용을 정리족 PDF에서 찾아 상세히 정리하세요.
-
+{skip_note}
 [수업 목록]
 {subjects}
 
@@ -267,11 +274,25 @@ def run_exam_prep(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
+    # 교수 변경 감지 (정리족 기준)
+    jungri_text = extract_pdf_text(jungri_pdf)
+    jungri_texts_for_check = [(jungri_pdf, jungri_text)]
+    skip_subjects: list[str] = []
+    for c in classes:
+        subject, professor = normalize_subject(c["subject"])
+        if check_prof_changed(subject, professor, jungri_texts_for_check):
+            skip_subjects.append(subject)
+    if skip_subjects:
+        print("⚠️  교수 변경 감지 — 정리족 제외 수업:")
+        for s in skip_subjects:
+            print(f"    - {s}")
+        print()
+
     # Agent 2, 3, 4: 병렬 실행
     print("에이전트 병렬 실행 중 (정리족 / 출족 / 강의록)...\n")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_jungri = executor.submit(agent_jungri, classes, jungri_pdf)
+        future_jungri = executor.submit(agent_jungri, classes, jungri_pdf, skip_subjects or None)
         future_chul = executor.submit(agent_chul, classes, chul_pdf)
         future_gangeui = executor.submit(agent_gangeui, classes)
 
@@ -498,6 +519,23 @@ def find_section_in_pdf(full_text: str, subject: str, professor: str) -> str | N
     return section if len(section) > 100 else None
 
 
+def check_prof_changed(subject: str, current_prof: str, seniors_jungri_texts: list[tuple[str, str]]) -> bool:
+    """선배족 정리족 목차에서 해당 과목의 교수명 확인. 현재 교수와 다르면 True (= 정리족 제외 대상)."""
+    if not current_prof:
+        return False
+    subject_variants = [re.sub(r'\s+', '', v) for v in _search_variants(subject)]
+    current_prof_norm = re.sub(r'\s+', '', current_prof)
+    for _, text in seniors_jungri_texts:
+        toc_area = text[:4000]
+        for m in re.finditer(r'([^\n·.]+?)\s*[·.]{4,}\s*p\s*[.\s]*(\d+)', toc_area):
+            entry_norm = re.sub(r'\s+', '', m.group(1))
+            for sv in subject_variants:
+                if sv and len(sv) > 2 and sv in entry_norm:
+                    # 목차 항목에 현재 교수명이 없으면 교수 변경
+                    return current_prof_norm not in entry_norm
+    return False  # 섹션 자체가 없는 경우 변경으로 간주하지 않음
+
+
 # ---------------------------------------------------------------------------
 # Feature 1: 예습 (preview)
 # ---------------------------------------------------------------------------
@@ -596,19 +634,25 @@ def run_preview(date_str: str) -> None:
     missing_jungri: list[str] = []
     missing_chul: list[str] = []
 
+    prof_changed_subjects: list[str] = []
+
     for c in classes:
         subject, professor = normalize_subject(c["subject"])
         label = f"{c['period']}교시 {subject}"
 
-        sec_j = None
-        for _, text in jungri_texts:
-            sec_j = find_section_in_pdf(text, subject, professor)
-            if sec_j:
-                break
-        if sec_j:
-            jungri_parts.append(f"### {label}\n{sec_j}")
+        if check_prof_changed(subject, professor, jungri_texts):
+            prof_changed_subjects.append(label)
+            jungri_parts.append(f"### {label}\n⛔ 교수 변경으로 정리족 제외 (선배족 기준 교수 상이)")
         else:
-            missing_jungri.append(label)
+            sec_j = None
+            for _, text in jungri_texts:
+                sec_j = find_section_in_pdf(text, subject, professor)
+                if sec_j:
+                    break
+            if sec_j:
+                jungri_parts.append(f"### {label}\n{sec_j}")
+            else:
+                missing_jungri.append(label)
 
         sec_c = None
         for _, text in chul_texts:
@@ -619,6 +663,12 @@ def run_preview(date_str: str) -> None:
             chul_parts.append(f"### {label}\n{sec_c}")
         else:
             missing_chul.append(label)
+
+    if prof_changed_subjects:
+        print("\n⚠️  교수 변경 감지 — 정리족 제외된 수업:")
+        for s in prof_changed_subjects:
+            print(f"    - {s}")
+        print()
 
     if missing_jungri or missing_chul:
         print("\n⚠️  다음 수업의 섹션을 PDF에서 찾을 수 없습니다. 확인 후 다시 실행해주세요.\n")
@@ -675,6 +725,7 @@ def agent_lecture_integrated(
     classes: list[dict],
     seniors_jungri_list: list[str],
     seniors_chul_list: list[str],
+    skip_jungri: bool = False,
 ) -> str:
     subjects_context = "\n".join(f"- {c['subject']}" for c in classes)
     ext = os.path.splitext(lecture_path)[1].lower()
@@ -688,20 +739,36 @@ def agent_lecture_integrated(
             f' > /tmp/new_lecture.txt && cat /tmp/new_lecture.txt'
         )
 
-    jungri_paths = "\n".join(f'- "{p}"' for p in seniors_jungri_list)
     chul_paths   = "\n".join(f'- "{p}"' for p in seniors_chul_list)
-    jungri_cmds  = "\n".join(
-        f'pdftotext -layout "{p}" /tmp/jungri_lec_{i}.txt && grep -n "{subject}" /tmp/jungri_lec_{i}.txt'
-        for i, p in enumerate(seniors_jungri_list)
-    )
     chul_cmds    = "\n".join(
         f'pdftotext -layout "{p}" /tmp/chul_lec_{i}.txt && grep -n "{subject}" /tmp/chul_lec_{i}.txt'
         for i, p in enumerate(seniors_chul_list)
     )
 
+    if skip_jungri:
+        jungri_section = f"""⛔ 교수 변경 수업: 선배족 정리족은 이전 교수님 기준이므로 참고하지 않습니다."""
+        jungri_steps = "2. (정리족 제외 — 교수 변경 수업)"
+        comparison_section = """## 정리족과의 비교
+⛔ 교수 변경으로 선배족 정리족 비교 생략 — 강의 파일이 이번 시험의 유일한 기준입니다."""
+    else:
+        jungri_paths = "\n".join(f'- "{p}"' for p in seniors_jungri_list)
+        jungri_cmds  = "\n".join(
+            f'pdftotext -layout "{p}" /tmp/jungri_lec_{i}.txt && grep -n "{subject}" /tmp/jungri_lec_{i}.txt'
+            for i, p in enumerate(seniors_jungri_list)
+        )
+        jungri_section = f"""- 선배족 정리족 파일들:
+{jungri_paths}"""
+        jungri_steps = f"""2. 정리족 파일들에서 "{subject}" 섹션 탐색:
+{jungri_cmds}
+3. 위에서 섹션이 있는 파일의 해당 부분을 읽기"""
+        comparison_section = """## 정리족과의 비교
+### ✅ 정리족과 일치하는 내용
+### 🆕 강의에만 있는 새 내용 (중요!)
+### ⚠️ 정리족에 있지만 강의에서 다루지 않은 내용"""
+
     prompt = f"""당신은 의과대학 당일 강의록 통합 분석 전문가입니다.
 
-오늘 교수님께서 나눠주신 강의 파일을 선배족 정리족/출족과 비교 분석하세요.
+오늘 교수님께서 나눠주신 강의 파일을 선배족 출족과 비교 분석하세요.
 선배족은 여러 파일로 나뉘어 있으니, 각 파일을 확인해서 "{subject}" 관련 섹션이 있는 파일을 찾으세요.
 
 [오늘 수업 과목] {subject}
@@ -710,30 +777,24 @@ def agent_lecture_integrated(
 
 [파일 경로]
 - 오늘 강의 파일: {lecture_path}
-- 선배족 정리족 파일들:
-{jungri_paths}
+{jungri_section}
 - 선배족 출족 파일들:
 {chul_paths}
 
 [작업 순서]
 1. 강의 파일 읽기: {read_instruction}
-2. 정리족 파일들에서 "{subject}" 섹션 탐색:
-{jungri_cmds}
-3. 위에서 섹션이 있는 파일의 해당 부분을 읽기
+{jungri_steps}
 4. 출족 파일들에서 "{subject}" 섹션 탐색:
 {chul_cmds}
 5. 위에서 섹션이 있는 파일의 해당 부분을 읽기
-6. 세 자료를 비교 분석하여 아래 형식으로 출력
+6. 자료를 비교 분석하여 아래 형식으로 출력
 
 [출력 형식]
 
 ## 강의 파일 핵심 내용
 (오늘 강의에서 다룬 주요 내용을 구조화하여 정리)
 
-## 정리족과의 비교
-### ✅ 정리족과 일치하는 내용
-### 🆕 강의에만 있는 새 내용 (중요!)
-### ⚠️ 정리족에 있지만 강의에서 다루지 않은 내용
+{comparison_section}
 
 ## 출족 관점: 시험 출제 가능성
 ### 🔥 이번 강의 내용 중 기출 있는 토픽 (연도 및 문제 유형 포함)
@@ -773,20 +834,31 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
         return
 
     subject = detect_subject_from_filename(lecture_path)
+    professor = ""
     if subject is None:
         if classes:
-            subject = classes[0]["subject"]
+            subject, professor = normalize_subject(classes[0]["subject"])
             print(f"[경고] 파일명에서 과목을 인식할 수 없어 '{subject}'로 설정합니다.")
         else:
             subject = os.path.splitext(os.path.basename(lecture_path))[0]
             print(f"[경고] 시간표에서도 과목을 찾을 수 없어 파일명을 사용합니다.")
     else:
-        print(f"[과목 자동 감지] {subject}")
+        # 시간표에서 해당 과목의 교수 추출
+        for c in classes:
+            s, p = normalize_subject(c["subject"])
+            if re.sub(r'\s+', '', s) == re.sub(r'\s+', '', subject):
+                professor = p
+                break
+        print(f"[과목 자동 감지] {subject} / {professor}")
 
-    print(f"  선배족 정리족: {len(all_jungri)}개 파일")
+    jungri_texts = [(p, extract_pdf_text(p)) for p in all_jungri]
+    skip_jungri = check_prof_changed(subject, professor, jungri_texts)
+    if skip_jungri:
+        print(f"  ⛔ 교수 변경 감지 ({professor}) — 정리족 제외")
+    print(f"  선배족 정리족: {len(all_jungri)}개 파일{'  (제외)' if skip_jungri else ''}")
     print(f"  선배족 출족:   {len(all_chul)}개 파일\n")
 
-    result = agent_lecture_integrated(lecture_path, subject, classes, all_jungri, all_chul)
+    result = agent_lecture_integrated(lecture_path, subject, classes, all_jungri, all_chul, skip_jungri=skip_jungri)
     print("[강의록 통합 Agent] 완료.")
 
     fname = f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}"
