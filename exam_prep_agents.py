@@ -127,33 +127,21 @@ def run_claude(prompt: str, agent_name: str, timeout: int = 600, allowed_tools: 
 # Agent 2: 정리족
 # ---------------------------------------------------------------------------
 
-def agent_jungri(classes: list[dict], jungri_pdf: str, skip_subjects: list[str] | None = None) -> str:
+def agent_jungri(classes: list[dict], sections_text: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
-    skip_note = ""
-    if skip_subjects:
-        skip_list = "\n".join(f"- {s}" for s in skip_subjects)
-        skip_note = f"""
-⛔ 아래 수업은 교수님이 바뀌어 정리족 내용이 의미 없으므로 완전히 건너뛰세요:
-{skip_list}
-"""
 
     prompt = f"""당신은 의과대학 시험 대비 정리족 분석 전문가입니다.
 
-아래 수업들의 내용을 정리족 PDF에서 찾아 상세히 정리하세요.
-{skip_note}
+아래는 수업별 정리족 섹션입니다. 각 수업을 상세히 분석하세요.
+교수 변경으로 제외된 수업은 "⛔ 교수 변경으로 정리족 제외" 표시가 있으니 건너뛰세요.
+
 [수업 목록]
 {subjects}
 
-[정리족 파일]
-{jungri_pdf}
+[수업별 정리족 섹션]
+{sections_text}
 
-[작업 순서]
-1. Bash 도구로 PDF를 텍스트로 변환하세요:
-   pdftotext -layout "{jungri_pdf}" /tmp/jungri.txt
-2. Bash로 목차를 확인하세요:
-   head -n 200 /tmp/jungri.txt
-3. 각 수업별로 Bash grep 또는 Read로 섹션을 찾아 내용을 읽으세요.
-4. 아래 형식으로 각 수업을 정리하세요:
+[출력 형식 — 수업별로 반복]
 
 ## [수업명]
 ### 핵심 개념
@@ -170,26 +158,20 @@ def agent_jungri(classes: list[dict], jungri_pdf: str, skip_subjects: list[str] 
 # Agent 3: 출족
 # ---------------------------------------------------------------------------
 
-def agent_chul(classes: list[dict], chul_pdf: str) -> str:
+def agent_chul(classes: list[dict], sections_text: str) -> str:
     subjects = "\n".join(f"- {c['subject']}" for c in classes)
 
     prompt = f"""당신은 의과대학 기출문제 분석 전문가입니다.
 
-아래 수업들의 기출문제를 출족 PDF에서 찾아 분석하세요.
+아래는 수업별 출족 섹션입니다. 각 수업의 기출문제를 분석하세요.
 
 [수업 목록]
 {subjects}
 
-[출족 파일]
-{chul_pdf}
+[수업별 출족 섹션]
+{sections_text}
 
-[작업 순서]
-1. Bash 도구로 PDF를 텍스트로 변환하세요:
-   pdftotext -layout "{chul_pdf}" /tmp/chul.txt
-2. Bash로 목차를 확인하세요:
-   head -n 200 /tmp/chul.txt
-3. 각 수업별로 기출문제 섹션을 찾아 읽으세요.
-4. 아래 형식으로 정리하세요:
+[출력 형식 — 수업별로 반복]
 
 ## [수업명]
 ### 기출문제 (최신순)
@@ -274,26 +256,45 @@ def run_exam_prep(date_str: str) -> None:
         print(f"  {c['period']}교시: {c['subject']}")
     print()
 
-    # 교수 변경 감지 (정리족 기준)
+    # Python 사전 추출 (캐시 활용): 에이전트가 대용량 PDF 전체를 읽는 토큰 절감
+    print("  [사전 추출] 족보 섹션 추출 중...")
     jungri_text = extract_pdf_text(jungri_pdf)
+    chul_text   = extract_pdf_text(chul_pdf)
     jungri_texts_for_check = [(jungri_pdf, jungri_text)]
-    skip_subjects: list[str] = []
+
+    jungri_parts: list[str] = []
+    chul_parts:   list[str] = []
+    prof_changed_subjects: list[str] = []
+
     for c in classes:
         subject, professor = normalize_subject(c["subject"])
+        label = f"{c['period']}교시 {subject}"
+
         if check_prof_changed(subject, professor, jungri_texts_for_check):
-            skip_subjects.append(subject)
-    if skip_subjects:
+            prof_changed_subjects.append(subject)
+            jungri_parts.append(f"### {label}\n⛔ 교수 변경으로 정리족 제외")
+        else:
+            sec_j = find_section_in_pdf(jungri_text, subject, professor)
+            jungri_parts.append(f"### {label}\n{sec_j}" if sec_j else f"### {label}\n(섹션 없음)")
+
+        sec_c = find_section_in_pdf(chul_text, subject, professor)
+        chul_parts.append(f"### {label}\n{sec_c}" if sec_c else f"### {label}\n(섹션 없음)")
+
+    if prof_changed_subjects:
         print("⚠️  교수 변경 감지 — 정리족 제외 수업:")
-        for s in skip_subjects:
+        for s in prof_changed_subjects:
             print(f"    - {s}")
-        print()
+    print()
+
+    jungri_sections_text = "\n\n".join(jungri_parts)
+    chul_sections_text   = "\n\n".join(chul_parts)
 
     # Agent 2, 3, 4: 병렬 실행
     print("에이전트 병렬 실행 중 (정리족 / 출족 / 강의록)...\n")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_jungri = executor.submit(agent_jungri, classes, jungri_pdf, skip_subjects or None)
-        future_chul = executor.submit(agent_chul, classes, chul_pdf)
+        future_jungri = executor.submit(agent_jungri, classes, jungri_sections_text)
+        future_chul = executor.submit(agent_chul, classes, chul_sections_text)
         future_gangeui = executor.submit(agent_gangeui, classes)
 
         jungri_result = future_jungri.result()
@@ -723,8 +724,8 @@ def agent_lecture_integrated(
     lecture_path: str,
     subject: str,
     classes: list[dict],
-    seniors_jungri_list: list[str],
-    seniors_chul_list: list[str],
+    jungri_section: str,
+    chul_section: str,
     skip_jungri: bool = False,
 ) -> str:
     subjects_context = "\n".join(f"- {c['subject']}" for c in classes)
@@ -739,28 +740,12 @@ def agent_lecture_integrated(
             f' > /tmp/new_lecture.txt && cat /tmp/new_lecture.txt'
         )
 
-    chul_paths   = "\n".join(f'- "{p}"' for p in seniors_chul_list)
-    chul_cmds    = "\n".join(
-        f'pdftotext -layout "{p}" /tmp/chul_lec_{i}.txt && grep -n "{subject}" /tmp/chul_lec_{i}.txt'
-        for i, p in enumerate(seniors_chul_list)
-    )
-
     if skip_jungri:
-        jungri_section = f"""⛔ 교수 변경 수업: 선배족 정리족은 이전 교수님 기준이므로 참고하지 않습니다."""
-        jungri_steps = "2. (정리족 제외 — 교수 변경 수업)"
+        jungri_block = "⛔ 교수 변경 수업: 선배족 정리족은 이전 교수님 기준이므로 참고하지 않습니다."
         comparison_section = """## 정리족과의 비교
 ⛔ 교수 변경으로 선배족 정리족 비교 생략 — 강의 파일이 이번 시험의 유일한 기준입니다."""
     else:
-        jungri_paths = "\n".join(f'- "{p}"' for p in seniors_jungri_list)
-        jungri_cmds  = "\n".join(
-            f'pdftotext -layout "{p}" /tmp/jungri_lec_{i}.txt && grep -n "{subject}" /tmp/jungri_lec_{i}.txt'
-            for i, p in enumerate(seniors_jungri_list)
-        )
-        jungri_section = f"""- 선배족 정리족 파일들:
-{jungri_paths}"""
-        jungri_steps = f"""2. 정리족 파일들에서 "{subject}" 섹션 탐색:
-{jungri_cmds}
-3. 위에서 섹션이 있는 파일의 해당 부분을 읽기"""
+        jungri_block = jungri_section or "(섹션 없음)"
         comparison_section = """## 정리족과의 비교
 ### ✅ 정리족과 일치하는 내용
 ### 🆕 강의에만 있는 새 내용 (중요!)
@@ -768,26 +753,22 @@ def agent_lecture_integrated(
 
     prompt = f"""당신은 의과대학 당일 강의록 통합 분석 전문가입니다.
 
-오늘 교수님께서 나눠주신 강의 파일을 선배족 출족과 비교 분석하세요.
-선배족은 여러 파일로 나뉘어 있으니, 각 파일을 확인해서 "{subject}" 관련 섹션이 있는 파일을 찾으세요.
+오늘 교수님께서 나눠주신 강의 파일을 선배족 정리족/출족과 비교 분석하세요.
+선배족 섹션은 아래에 이미 추출되어 있습니다 — 추가로 PDF를 열 필요가 없습니다.
 
 [오늘 수업 과목] {subject}
 [오늘 전체 수업 목록]
 {subjects_context}
 
-[파일 경로]
-- 오늘 강의 파일: {lecture_path}
-{jungri_section}
-- 선배족 출족 파일들:
-{chul_paths}
-
 [작업 순서]
 1. 강의 파일 읽기: {read_instruction}
-{jungri_steps}
-4. 출족 파일들에서 "{subject}" 섹션 탐색:
-{chul_cmds}
-5. 위에서 섹션이 있는 파일의 해당 부분을 읽기
-6. 자료를 비교 분석하여 아래 형식으로 출력
+2. 아래 제공된 선배족 섹션과 비교 분석하여 출력
+
+[선배족 정리족 섹션]
+{jungri_block}
+
+[선배족 출족 섹션]
+{chul_section or "(섹션 없음)"}
 
 [출력 형식]
 
@@ -851,14 +832,36 @@ def run_lecture(lecture_path: str, date_str: str) -> None:
                 break
         print(f"[과목 자동 감지] {subject} / {professor}")
 
+    # Python 사전 추출 (캐시 활용): 에이전트가 대용량 선배족 PDF 전체를 읽는 토큰 절감
     jungri_texts = [(p, extract_pdf_text(p)) for p in all_jungri]
+    chul_texts   = [(p, extract_pdf_text(p)) for p in all_chul]
+
     skip_jungri = check_prof_changed(subject, professor, jungri_texts)
     if skip_jungri:
         print(f"  ⛔ 교수 변경 감지 ({professor}) — 정리족 제외")
     print(f"  선배족 정리족: {len(all_jungri)}개 파일{'  (제외)' if skip_jungri else ''}")
     print(f"  선배족 출족:   {len(all_chul)}개 파일\n")
 
-    result = agent_lecture_integrated(lecture_path, subject, classes, all_jungri, all_chul, skip_jungri=skip_jungri)
+    jungri_section = ""
+    if not skip_jungri:
+        for _, text in jungri_texts:
+            sec = find_section_in_pdf(text, subject, professor)
+            if sec:
+                jungri_section = sec
+                break
+
+    chul_section = ""
+    for _, text in chul_texts:
+        sec = find_section_in_pdf(text, subject, professor)
+        if sec:
+            chul_section = sec
+            break
+
+    result = agent_lecture_integrated(
+        lecture_path, subject, classes,
+        jungri_section, chul_section,
+        skip_jungri=skip_jungri,
+    )
     print("[강의록 통합 Agent] 완료.")
 
     fname = f"lecture_{safe_filename(date_str)}_{safe_filename(subject)}"
