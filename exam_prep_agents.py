@@ -18,6 +18,16 @@ import openpyxl
 import markdown
 from weasyprint import HTML as WeasyHTML
 
+# fontTools 4.x 버그 우회: recalcUnicodeRanges가 범위 초과 값(123)을 반환하는 경우 방어
+try:
+    import fontTools.ttLib.tables.O_S_2f_2 as _os2
+    _orig_set_unicode_ranges = _os2.table_O_S_2f_2.setUnicodeRanges
+    def _patched_set_unicode_ranges(self, bits):
+        _orig_set_unicode_ranges(self, {b for b in bits if 0 <= b <= 122})
+    _os2.table_O_S_2f_2.setUnicodeRanges = _patched_set_unicode_ranges
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1462,7 +1472,24 @@ def convert_to_pdf(md_path: str, pdf_path: str | None = None) -> str:
 <body>{body_html}</body>
 </html>"""
 
-    WeasyHTML(string=html, base_url=BASE_DIR).write_pdf(pdf_path)
+    try:
+        WeasyHTML(string=html, base_url=BASE_DIR).write_pdf(pdf_path)
+    except Exception as e:
+        print(f"  ⚠️  WeasyPrint PDF 변환 실패 ({e.__class__.__name__}): {e}")
+        # pandoc 폴백
+        try:
+            result = subprocess.run(
+                ["pandoc", md_path, "-o", pdf_path, "--pdf-engine=xelatex",
+                 "-V", "mainfont=Noto Sans CJK KR", "-V", "geometry:margin=2cm"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr[:200])
+            print(f"  ✅  pandoc 폴백으로 PDF 생성 완료")
+        except Exception as e2:
+            print(f"  ❌  PDF 생성 실패 (pandoc도 실패): {e2}")
+            print(f"     → MD 파일은 정상 저장됨: {md_path}")
+            return md_path
     return pdf_path
 
 
